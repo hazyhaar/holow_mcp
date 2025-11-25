@@ -12,6 +12,11 @@ import (
 // ConnCallback est un callback appelé lors de l'ouverture d'une connexion
 type ConnCallback func(conn *sqlite3.Conn) error
 
+// HolowAppID est l'identifiant d'application SQLite pour HOLOW-MCP
+// Permet de détecter si une base a été créée par holow-mcp
+// Valeur: 0x484F4C57 = "HOLW" en ASCII
+const HolowAppID = 0x484F4C57
+
 // horosPragmas contient les pragmas optimisés pour HOROS
 var horosPragmas = []string{
 	"PRAGMA journal_mode = WAL",
