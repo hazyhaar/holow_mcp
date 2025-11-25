@@ -1,0 +1,38 @@
+# Binaries
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test programs
+test_cdp_call
+test_browser_navigate
+test_cdp_call.go
+test_browser_navigate.go
+
+# SQLite databases
+*.db
+*.db-shm
+*.db-wal
+
+# Go build artifacts
+*.test
+*.out
+*.prof
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary directories
+tmp/
+temp/
+chromium-holow-*/
