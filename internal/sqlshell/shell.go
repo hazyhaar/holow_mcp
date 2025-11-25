@@ -1,4 +1,4 @@
-// Package sqlshell fournit un shell SQL interactif compatible ncruces WASM
+// Package sqlshell fournit un shell SQL interactif pour HOLOW-MCP
 package sqlshell
 
 import (
@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/ncruces/go-sqlite3/driver"
+	_ "modernc.org/sqlite"
 )
 
 // Shell représente un shell SQL interactif
@@ -41,7 +41,7 @@ func (s *Shell) Run(dbName, query string) error {
 
 // Interactive démarre le mode REPL interactif
 func (s *Shell) Interactive() error {
-	fmt.Fprintln(s.out, "HOLOW-MCP SQL Shell (ncruces WASM compatible)")
+	fmt.Fprintln(s.out, "HOLOW-MCP SQL Shell (modernc.org/sqlite)")
 	fmt.Fprintln(s.out, "Type .help for commands, .quit to exit")
 	fmt.Fprintln(s.out, "")
 
@@ -194,8 +194,8 @@ func (s *Shell) openDB(name string) error {
 		return fmt.Errorf("database not found: %s", path)
 	}
 
-	// Ouvrir avec ncruces driver (compatible WASM)
-	db, err := driver.Open(path, nil)
+	// Ouvrir avec modernc.org/sqlite
+	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return fmt.Errorf("failed to open: %w", err)
 	}

@@ -16,8 +16,7 @@ import (
 	"strings"
 
 	"github.com/horos/holow-mcp/internal/database"
-	_ "github.com/ncruces/go-sqlite3/driver"
-	_ "github.com/ncruces/go-sqlite3/embed"
+	_ "modernc.org/sqlite"
 )
 
 // Config représente la configuration d'initialisation
@@ -231,7 +230,7 @@ func detectExistingInstall(basePath string) *Config {
 
 func testConnection(config *Config) error {
 	dbPath := filepath.Join(config.BasePath, "holow-mcp.lifecycle-core.db")
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return err
 	}
@@ -340,7 +339,7 @@ func promptChoice(reader *bufio.Reader, prompt string, choices []string, default
 func createCredentialsDB(config *Config) error {
 	dbPath := filepath.Join(config.BasePath, fmt.Sprintf("holow-mcp.%s.db", config.CredentialsDB))
 
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return err
 	}
@@ -393,7 +392,7 @@ func createCredentialsDB(config *Config) error {
 func saveCredentials(config *Config) error {
 	dbPath := filepath.Join(config.BasePath, fmt.Sprintf("holow-mcp.%s.db", config.CredentialsDB))
 
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return err
 	}
@@ -502,7 +501,7 @@ func printSummary(config *Config) {
 func GetCredential(basePath, credentialsDB, provider string) (string, error) {
 	dbPath := filepath.Join(basePath, fmt.Sprintf("holow-mcp.%s.db", credentialsDB))
 
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return "", err
 	}
@@ -538,7 +537,7 @@ func GetCredential(basePath, credentialsDB, provider string) (string, error) {
 func ListProviders(basePath, credentialsDB string) ([]string, error) {
 	dbPath := filepath.Join(basePath, fmt.Sprintf("holow-mcp.%s.db", credentialsDB))
 
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, err
 	}
@@ -565,7 +564,7 @@ func ListProviders(basePath, credentialsDB string) ([]string, error) {
 func CredentialHint(basePath, credentialsDB, provider string) string {
 	dbPath := filepath.Join(basePath, fmt.Sprintf("holow-mcp.%s.db", credentialsDB))
 
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return ""
 	}
@@ -592,7 +591,7 @@ func ExportConfig(config *Config) string {
 func KeyFingerprint(basePath, credentialsDB string) string {
 	dbPath := filepath.Join(basePath, fmt.Sprintf("holow-mcp.%s.db", credentialsDB))
 
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return ""
 	}

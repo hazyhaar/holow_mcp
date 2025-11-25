@@ -1,16 +1,12 @@
-// Package database - Ouverture unifiée des bases SQLite avec callbacks optionnels
+// Package database - Ouverture unifiée des bases SQLite avec modernc.org/sqlite
 package database
 
 import (
 	"database/sql"
 	"fmt"
 
-	"github.com/ncruces/go-sqlite3"
-	"github.com/ncruces/go-sqlite3/driver"
+	_ "modernc.org/sqlite"
 )
-
-// ConnCallback est un callback appelé lors de l'ouverture d'une connexion
-type ConnCallback func(conn *sqlite3.Conn) error
 
 // HolowAppID est l'identifiant d'application SQLite pour HOLOW-MCP
 // Permet de détecter si une base a été créée par holow-mcp
@@ -27,11 +23,15 @@ var horosPragmas = []string{
 	"PRAGMA wal_autocheckpoint = 10000",
 }
 
-// applyPragmas applique les pragmas HOROS à une connexion
-func applyPragmas(conn *sqlite3.Conn) error {
+// ConnCallback est un callback appelé après l'ouverture d'une connexion
+// Note: avec modernc, les custom functions sont enregistrées globalement
+type ConnCallback func(db *sql.DB) error
+
+// applyPragmas applique les pragmas HOROS à une base
+func applyPragmas(db *sql.DB) error {
 	for _, pragma := range horosPragmas {
-		if err := conn.Exec(pragma); err != nil {
-			return fmt.Errorf("failed to set pragma: %w", err)
+		if _, err := db.Exec(pragma); err != nil {
+			return fmt.Errorf("failed to set pragma %s: %w", pragma, err)
 		}
 	}
 	return nil
@@ -40,27 +40,24 @@ func applyPragmas(conn *sqlite3.Conn) error {
 // openDBWithConnector ouvre une base SQLite avec un callback optionnel
 // C'est la méthode unifiée pour TOUTES les bases holow-mcp
 func openDBWithConnector(path string, callback ConnCallback) (*sql.DB, error) {
-	// Créer le callback qui applique les pragmas + callback custom
-	initCallback := func(conn *sqlite3.Conn) error {
-		// Appliquer les pragmas HOROS
-		if err := applyPragmas(conn); err != nil {
-			return err
-		}
-
-		// Appeler le callback custom si fourni
-		if callback != nil {
-			if err := callback(conn); err != nil {
-				return fmt.Errorf("custom callback failed: %w", err)
-			}
-		}
-
-		return nil
-	}
-
-	// Ouvrir la base avec le callback via driver.Open()
-	db, err := driver.Open(path, initCallback)
+	// Ouvrir la base avec modernc.org/sqlite
+	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
+	}
+
+	// Appliquer les pragmas HOROS
+	if err := applyPragmas(db); err != nil {
+		db.Close()
+		return nil, err
+	}
+
+	// Appeler le callback custom si fourni
+	if callback != nil {
+		if err := callback(db); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("custom callback failed: %w", err)
+		}
 	}
 
 	// Tester la connexion

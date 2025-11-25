@@ -7,9 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-
-	_ "github.com/ncruces/go-sqlite3/driver"
-	_ "github.com/ncruces/go-sqlite3/embed"
 )
 
 // Manager gère les connexions aux 6 bases de données

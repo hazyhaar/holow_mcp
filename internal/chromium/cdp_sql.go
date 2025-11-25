@@ -6,10 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
-
-	"github.com/ncruces/go-sqlite3"
-	_ "github.com/ncruces/go-sqlite3/driver"
-	_ "github.com/ncruces/go-sqlite3/embed"
 )
 
 // CDPManager gère la connexion CDP persistante et expose cdp_call() à SQLite
@@ -385,9 +381,4 @@ func (m *CDPManager) SyncCall(method string, paramsJSON string) (string, error) 
 
 	// Appeler directement
 	return m.Call(method, params)
-}
-
-// RegisterCDPFunctions implémente l'interface pour database.OpenWithCDPFunctions
-func (m *CDPManager) RegisterCDPFunctions(conn *sqlite3.Conn) error {
-	return RegisterCDPFunctions(conn, m)
 }

@@ -2,12 +2,11 @@
 package database
 
 import (
+	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/ncruces/go-sqlite3/driver"
 )
 
 // DBHealth représente l'état de santé d'une base
@@ -101,8 +100,8 @@ func checkDatabase(basePath, name string) DBHealth {
 		health.HasSHM = true
 	}
 
-	// Ouvrir la base avec ncruces
-	db, err := driver.Open(health.Path, nil)
+	// Ouvrir la base avec modernc.org/sqlite
+	db, err := sql.Open("sqlite", health.Path)
 	if err != nil {
 		health.IntegrityMsg = fmt.Sprintf("impossible d'ouvrir: %v", err)
 		return health
@@ -154,7 +153,7 @@ func CleanOrphanWAL(basePath string) ([]string, error) {
 
 // SetApplicationID marque une base comme HOLOW
 func SetApplicationID(dbPath string) error {
-	db, err := driver.Open(dbPath, nil)
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return err
 	}

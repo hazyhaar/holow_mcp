@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -26,7 +27,6 @@ import (
 	"github.com/horos/holow-mcp/internal/initcli"
 	"github.com/horos/holow-mcp/internal/observability"
 	"github.com/horos/holow-mcp/internal/tools"
-	"github.com/ncruces/go-sqlite3"
 )
 
 // Server représente le serveur MCP HOLOW
@@ -80,10 +80,10 @@ func NewServer(basePath string) (*Server, error) {
 	// Étape 1: Créer le CDPManager avec db = nil (sera configuré après)
 	cdpMgr := chromium.NewCDPManager(nil)
 
-	// Étape 2: Créer le callback CDP qui enregistre les fonctions SQL
-	// Le callback reçoit une *sqlite3.Conn lors de l'ouverture de LifecycleTools
-	cdpCallback := func(conn *sqlite3.Conn) error {
-		return chromium.RegisterCDPFunctions(conn, cdpMgr)
+	// Étape 2: Créer le callback CDP qui enregistre les fonctions
+	// Avec modernc.org/sqlite, les fonctions sont gérées globalement
+	cdpCallback := func(db *sql.DB) error {
+		return chromium.RegisterCDPFunctions(db, cdpMgr)
 	}
 
 	// Étape 3: Créer le database.Manager avec le callback
