@@ -22,6 +22,7 @@ import (
 	"github.com/horos/holow-mcp/internal/circuit"
 	"github.com/horos/holow-mcp/internal/database"
 	"github.com/horos/holow-mcp/internal/discovery"
+	"github.com/horos/holow-mcp/internal/initcli"
 	"github.com/horos/holow-mcp/internal/observability"
 	"github.com/horos/holow-mcp/internal/tools"
 	"github.com/ncruces/go-sqlite3"
@@ -37,10 +38,12 @@ type Server struct {
 	alerts     *observability.AlertChecker
 	browser    *chromium.ToolsManager
 	brainloop  *brainloop.ToolsManager
+	appConfig  *initcli.AppConfig
 
-	stdin     io.Reader
-	stdout    io.Writer
+	stdin  io.Reader
+	stdout io.Writer
 
+	basePath          string
 	requestsProcessed int64
 	requestsFailed    int64
 
@@ -119,10 +122,24 @@ func NewServer(basePath string) (*Server, error) {
 		alerts:       observability.NewAlertChecker(db.Metadata, db.Output),
 		browser:      chromium.NewToolsManager(browserCfg),
 		brainloop:    brainloopMgr,
+		basePath:     basePath,
 		stdin:        os.Stdin,
 		stdout:       os.Stdout,
 		shutdownChan: make(chan struct{}),
 	}, nil
+}
+
+// NewServerWithConfig crée un nouveau serveur MCP avec une configuration
+func NewServerWithConfig(basePath string, appConfig *initcli.AppConfig) (*Server, error) {
+	srv, err := NewServer(basePath)
+	if err != nil {
+		return nil, err
+	}
+
+	srv.appConfig = appConfig
+	srv.basePath = basePath
+
+	return srv, nil
 }
 
 // Start démarre le serveur MCP
@@ -870,8 +887,27 @@ func (s *Server) Shutdown() {
 	// Checkpoint WAL
 	s.db.Checkpoint()
 
+	// Backup automatique si configuré
+	if s.appConfig != nil && s.appConfig.BackupEnabled {
+		fmt.Fprintln(os.Stderr, "Creating backup...")
+		backupFile, err := s.appConfig.CreateBackupNow()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Backup error: %v\n", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "Backup created: %s\n", backupFile)
+		}
+	}
+
 	// Fermer les bases
 	s.db.Close()
+}
+
+// GetCredential récupère une clé API depuis la configuration
+func (s *Server) GetCredential(provider string) (string, error) {
+	if s.appConfig == nil {
+		return "", fmt.Errorf("configuration non chargée")
+	}
+	return s.appConfig.GetCredential(provider)
 }
 
 // AddRetryJob ajoute un job à la queue de retry

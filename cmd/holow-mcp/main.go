@@ -9,26 +9,120 @@ import (
 	"path/filepath"
 
 	"github.com/horos/holow-mcp/internal/database"
+	"github.com/horos/holow-mcp/internal/initcli"
 	"github.com/horos/holow-mcp/internal/server"
 )
 
 func main() {
 	// Flags
 	initDB := flag.Bool("init", false, "Initialize databases with schemas")
-	basePath := flag.String("path", "/workspace/projets/holow-mcp", "Base path for databases")
+	initInteractive := flag.Bool("setup", false, "Run interactive setup wizard")
+	basePath := flag.String("path", "", "Base path for databases")
 	schemasPath := flag.String("schemas", "", "Path to schema SQL files")
+	showConfig := flag.Bool("config", false, "Show current configuration")
+	listCreds := flag.Bool("list-creds", false, "List configured credentials")
 	flag.Parse()
+
+	// Déterminer le chemin de base
+	if *basePath == "" {
+		// Essayer de charger depuis config existante
+		home, _ := os.UserHomeDir()
+		defaultPath := filepath.Join(home, ".holow-mcp")
+
+		if initcli.ConfigExists(defaultPath) {
+			cfg, _ := initcli.LoadAppConfig(defaultPath)
+			if cfg != nil {
+				*basePath = cfg.BasePath
+			}
+		}
+
+		// Fallback
+		if *basePath == "" {
+			*basePath = defaultPath
+		}
+	}
+
+	// Mode setup interactif
+	if *initInteractive {
+		cfg, err := initcli.Run()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Erreur setup: %v\n", err)
+			os.Exit(1)
+		}
+
+		// Sauvegarder la config
+		appCfg := &initcli.AppConfig{
+			BasePath:       cfg.BasePath,
+			CredentialsDB:  cfg.CredentialsDB,
+			BackupEnabled:  true,
+			BackupMaxCount: 5,
+			DebugPort:      9222,
+		}
+		if err := initcli.SaveAppConfig(appCfg); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: impossible de sauvegarder config.json: %v\n", err)
+		}
+
+		// Mettre à jour basePath pour l'init des schémas
+		*basePath = cfg.BasePath
+		*initDB = true // Continuer vers l'init des schémas
+	}
+
+	// Mode affichage config
+	if *showConfig {
+		cfg, err := initcli.LoadAppConfig(*basePath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Erreur chargement config: %v\n", err)
+			os.Exit(1)
+		}
+
+		fmt.Printf("Configuration HOLOW-MCP:\n")
+		fmt.Printf("  Chemin: %s\n", cfg.BasePath)
+		fmt.Printf("  Base credentials: %s\n", cfg.CredentialsDB)
+		fmt.Printf("  Backup activé: %v\n", cfg.BackupEnabled)
+		fmt.Printf("  Backups max: %d\n", cfg.BackupMaxCount)
+		fmt.Printf("  Port CDP: %d\n", cfg.DebugPort)
+
+		if cfg.CredentialsAvailable() {
+			fmt.Printf("  Fingerprint clé: %s\n", initcli.KeyFingerprint(cfg.BasePath, cfg.CredentialsDB))
+		}
+		return
+	}
+
+	// Mode liste credentials
+	if *listCreds {
+		cfg, err := initcli.LoadAppConfig(*basePath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Erreur chargement config: %v\n", err)
+			os.Exit(1)
+		}
+
+		providers, err := cfg.GetProviders()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Erreur lecture credentials: %v\n", err)
+			os.Exit(1)
+		}
+
+		fmt.Println("Credentials configurés:")
+		for _, p := range providers {
+			hint := initcli.CredentialHint(cfg.BasePath, cfg.CredentialsDB, p)
+			fmt.Printf("  - %s (%s)\n", p, hint)
+		}
+		return
+	}
 
 	// Déterminer le chemin des schémas
 	if *schemasPath == "" {
-		// Par défaut, chercher dans le répertoire schemas relatif au binaire
 		execPath, err := os.Executable()
 		if err == nil {
 			*schemasPath = filepath.Join(filepath.Dir(execPath), "..", "..", "schemas")
 		}
 		if _, err := os.Stat(*schemasPath); os.IsNotExist(err) {
-			// Fallback: chercher relatif au working directory
 			*schemasPath = filepath.Join(*basePath, "schemas")
+		}
+		// Fallback: chercher dans le répertoire courant
+		if _, err := os.Stat(*schemasPath); os.IsNotExist(err) {
+			cwd, _ := os.Getwd()
+			*schemasPath = filepath.Join(cwd, "schemas")
 		}
 	}
 
@@ -51,8 +145,22 @@ func main() {
 		return
 	}
 
+	// Vérifier si l'installation existe
+	if !initcli.ConfigExists(*basePath) {
+		fmt.Fprintln(os.Stderr, "HOLOW-MCP n'est pas initialisé.")
+		fmt.Fprintln(os.Stderr, "Lancez d'abord: holow-mcp -setup")
+		os.Exit(1)
+	}
+
+	// Charger la configuration
+	appCfg, err := initcli.LoadAppConfig(*basePath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Erreur chargement config: %v\n", err)
+		os.Exit(1)
+	}
+
 	// Mode serveur: créer le serveur (qui créera les bases avec CDP intégré)
-	srv, err := server.NewServer(*basePath)
+	srv, err := server.NewServerWithConfig(*basePath, appCfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating server: %v\n", err)
 		os.Exit(1)
