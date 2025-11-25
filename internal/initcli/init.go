@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/horos/holow-mcp/internal/database"
 	_ "github.com/ncruces/go-sqlite3/driver"
 	_ "github.com/ncruces/go-sqlite3/embed"
 )
@@ -46,38 +47,87 @@ func Run() (*Config, error) {
 
 	printBanner()
 
-	// Étape 1: Détecter installation existante
+	// Étape 1: Détecter et valider installation existante
 	defaultPath := getDefaultBasePath()
-	existing := detectExistingInstall(defaultPath)
+	validation := database.ValidateDatabases(defaultPath)
 
 	var config *Config
 
-	if existing != nil {
-		fmt.Printf("\n[!] Installation existante détectée dans: %s\n", existing.BasePath)
-		fmt.Println("    1. Connecter aux bases existantes")
-		fmt.Println("    2. Purger et réinstaller")
-		fmt.Println("    3. Annuler")
+	// Vérifier si des bases existent
+	hasExisting := false
+	for _, db := range validation.Databases {
+		if db.Exists {
+			hasExisting = true
+			break
+		}
+	}
+
+	if hasExisting {
+		fmt.Printf("\n[!] Bases de données existantes détectées dans: %s\n", defaultPath)
+
+		// Afficher le rapport de validation
+		validation.PrintReport()
+
+		// Nettoyer les WAL orphelins automatiquement
+		if validation.HasOrphanWAL {
+			fmt.Println("\n[*] Nettoyage des fichiers WAL/SHM orphelins...")
+			cleaned, _ := database.CleanOrphanWAL(defaultPath)
+			for _, f := range cleaned {
+				fmt.Printf("    Supprimé: %s\n", f)
+			}
+		}
+
+		// Proposer les options
+		if validation.AllExist && validation.AllHealthy {
+			fmt.Println("\n    1. Conserver les bases existantes")
+			fmt.Println("    2. Purger et réinstaller")
+			fmt.Println("    3. Annuler")
+		} else {
+			fmt.Println("\n    1. Tenter de réparer (marquer comme HOLOW)")
+			fmt.Println("    2. Purger et réinstaller (recommandé)")
+			fmt.Println("    3. Annuler")
+		}
 
 		choice := promptChoice(reader, "Choix", []string{"1", "2", "3"}, "1")
 
 		switch choice {
 		case "1":
-			// Vérifier connexion
-			if err := testConnection(existing); err != nil {
-				fmt.Printf("\n[X] Connexion échouée: %v\n", err)
-				if promptYesNo(reader, "Purger et réinstaller?", false) {
-					purgeInstall(existing.BasePath)
-					config = &Config{BasePath: existing.BasePath, Providers: make(map[string]string)}
-				} else {
-					return nil, fmt.Errorf("connexion impossible")
+			if validation.AllExist && validation.AllHealthy {
+				// Marquer les bases comme HOLOW si pas déjà fait
+				for _, db := range validation.Databases {
+					if db.Exists && !db.IsHolow {
+						database.SetApplicationID(db.Path)
+					}
 				}
+				fmt.Println("\n[OK] Bases conservées et marquées")
+				config = &Config{BasePath: defaultPath, CredentialsDB: "credentials", Providers: make(map[string]string)}
 			} else {
-				fmt.Println("\n[OK] Connexion réussie")
-				config = existing
+				// Tenter de réparer
+				fmt.Println("\n[*] Tentative de réparation...")
+				repairOK := true
+				for _, db := range validation.Databases {
+					if db.Exists && !db.IntegrityOK {
+						fmt.Printf("    [X] %s: impossible de réparer (corrompue)\n", db.Name)
+						repairOK = false
+					} else if db.Exists {
+						database.SetApplicationID(db.Path)
+						fmt.Printf("    [OK] %s: marquée HOLOW\n", db.Name)
+					}
+				}
+				if !repairOK {
+					if promptYesNo(reader, "Bases corrompues détectées. Purger et réinstaller?", true) {
+						purgeInstall(defaultPath)
+						config = &Config{BasePath: defaultPath, Providers: make(map[string]string)}
+					} else {
+						return nil, fmt.Errorf("bases corrompues non réparables")
+					}
+				} else {
+					config = &Config{BasePath: defaultPath, CredentialsDB: "credentials", Providers: make(map[string]string)}
+				}
 			}
 		case "2":
-			purgeInstall(existing.BasePath)
-			config = &Config{BasePath: existing.BasePath, Providers: make(map[string]string)}
+			purgeInstall(defaultPath)
+			config = &Config{BasePath: defaultPath, Providers: make(map[string]string)}
 		case "3":
 			return nil, fmt.Errorf("annulé par l'utilisateur")
 		}
@@ -113,7 +163,7 @@ func Run() (*Config, error) {
 	}
 
 	// Étape 5: Créer les bases si nécessaire
-	if existing == nil {
+	if !hasExisting {
 		fmt.Println("\n[*] Création des bases de données...")
 		if err := createCredentialsDB(config); err != nil {
 			return nil, fmt.Errorf("erreur création credentials DB: %w", err)
