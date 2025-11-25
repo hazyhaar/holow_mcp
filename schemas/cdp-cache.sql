@@ -64,6 +64,22 @@ CREATE TABLE IF NOT EXISTS cdp_session_state (
 -- Initialiser avec une ligne par défaut
 INSERT OR IGNORE INTO cdp_session_state (id, connected) VALUES (1, 0);
 
+-- Table: cdp_commands
+-- Queue de commandes CDP (pour fonctions SQL)
+CREATE TABLE IF NOT EXISTS cdp_commands (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    method TEXT NOT NULL,
+    params TEXT DEFAULT '{}',
+    status TEXT DEFAULT 'pending' CHECK(status IN ('pending', 'success', 'error')),
+    result TEXT,
+    error TEXT,
+    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+    processed_at INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_cdp_commands_status ON cdp_commands(status);
+CREATE INDEX IF NOT EXISTS idx_cdp_commands_created ON cdp_commands(created_at DESC);
+
 -- Trigger pour nettoyer les vieux logs (garder seulement les 1000 derniers)
 CREATE TRIGGER IF NOT EXISTS cleanup_old_console_logs
 AFTER INSERT ON cdp_console_logs

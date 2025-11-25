@@ -820,27 +820,40 @@ func waitForDebugger(port int, timeout time.Duration) (string, error) {
 	return "", fmt.Errorf("timeout waiting for debugger on port %d", port)
 }
 
-// getDebuggerURL récupère l'URL WebSocket du débogueur
+// getDebuggerURL récupère l'URL WebSocket d'une PAGE (pas du browser)
+// Important: Les commandes Page.* ne fonctionnent qu'au niveau page, pas browser
 func getDebuggerURL(port int) (string, error) {
-	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/json/version", port))
+	// Se connecter à /json pour obtenir les pages, pas /json/version (browser)
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/json", port))
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
 
-	var info struct {
+	var pages []struct {
 		WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
+		Type                 string `json:"type"`
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&pages); err != nil {
 		return "", err
 	}
 
-	if info.WebSocketDebuggerURL == "" {
-		return "", fmt.Errorf("no WebSocket URL in response")
+	// Chercher une page de type "page"
+	for _, p := range pages {
+		if p.Type == "page" && p.WebSocketDebuggerURL != "" {
+			return p.WebSocketDebuggerURL, nil
+		}
 	}
 
-	return info.WebSocketDebuggerURL, nil
+	// Fallback: prendre n'importe quelle cible avec une URL WebSocket
+	for _, p := range pages {
+		if p.WebSocketDebuggerURL != "" {
+			return p.WebSocketDebuggerURL, nil
+		}
+	}
+
+	return "", fmt.Errorf("no page available - browser may have no tabs open")
 }
 
 // SaveScreenshot sauvegarde une capture d'écran dans un fichier
