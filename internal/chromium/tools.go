@@ -2,7 +2,6 @@
 package chromium
 
 import (
-	"encoding/base64"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -59,7 +58,7 @@ func (m *ToolsManager) ToolDefinitions() []map[string]interface{} {
 	return []map[string]interface{}{
 		{
 			"name":        "browser",
-			"description": "Browser automation tool. Actions: launch, connect, navigate, screenshot, evaluate, click, type, wait, get_html, get_url, get_title, cookies, set_cookie, pdf, close, list_actions",
+			"description": "Browser automation tool. Actions: launch, connect, navigate, screenshot, evaluate, click, type, wait, get_html, get_url, get_title, cookies, set_cookie, pdf, close, enable_devtools, console_logs, network_requests, list_actions",
 			"inputSchema": map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -71,6 +70,7 @@ func (m *ToolsManager) ToolDefinitions() []map[string]interface{} {
 							"evaluate", "click", "type", "wait",
 							"get_html", "get_url", "get_title",
 							"cookies", "set_cookie", "pdf", "close",
+							"enable_devtools", "console_logs", "network_requests",
 							"list_actions",
 						},
 					},
@@ -80,7 +80,7 @@ func (m *ToolsManager) ToolDefinitions() []map[string]interface{} {
 					},
 					"selector": map[string]interface{}{
 						"type":        "string",
-						"description": "CSS selector (for click, type, wait)",
+						"description": "CSS selector (for click, type, wait, get_html)",
 					},
 					"text": map[string]interface{}{
 						"type":        "string",
@@ -126,6 +126,14 @@ func (m *ToolsManager) ToolDefinitions() []map[string]interface{} {
 						"type":        "string",
 						"description": "Cookie domain (for set_cookie)",
 					},
+					"max_length": map[string]interface{}{
+						"type":        "integer",
+						"description": "Max HTML length to return (for get_html, avoids context overflow)",
+					},
+					"limit": map[string]interface{}{
+						"type":        "integer",
+						"description": "Max items to return (for console_logs, network_requests)",
+					},
 				},
 				"required": []string{"action"},
 			},
@@ -165,7 +173,7 @@ func (m *ToolsManager) Execute(toolName string, args map[string]interface{}) (in
 	case "wait":
 		return m.wait(args)
 	case "get_html":
-		return m.getHTML()
+		return m.getHTML(args)
 	case "get_url":
 		return m.getURL()
 	case "get_title":
@@ -178,6 +186,12 @@ func (m *ToolsManager) Execute(toolName string, args map[string]interface{}) (in
 		return m.pdf(args)
 	case "close":
 		return m.close()
+	case "console_logs":
+		return m.consoleLogs(args)
+	case "network_requests":
+		return m.networkRequests(args)
+	case "enable_devtools":
+		return m.enableDevtools(args)
 	case "list_actions":
 		return m.listActions()
 	default:
@@ -192,20 +206,23 @@ func (m *ToolsManager) listActions() (interface{}, error) {
 			{"name": "launch", "description": "Launch new browser instance", "params": []string{"headless", "port"}},
 			{"name": "connect", "description": "Connect to existing browser", "params": []string{"port"}},
 			{"name": "navigate", "description": "Navigate to URL", "params": []string{"url"}},
-			{"name": "screenshot", "description": "Take screenshot", "params": []string{"format", "path"}},
+			{"name": "screenshot", "description": "Take screenshot (saves to file, returns path only)", "params": []string{"format", "path"}},
 			{"name": "evaluate", "description": "Execute JavaScript", "params": []string{"expression"}},
 			{"name": "click", "description": "Click element", "params": []string{"selector"}},
 			{"name": "type", "description": "Type text into element", "params": []string{"selector", "text"}},
 			{"name": "wait", "description": "Wait for element", "params": []string{"selector", "timeout"}},
-			{"name": "get_html", "description": "Get page HTML", "params": []string{}},
+			{"name": "get_html", "description": "Get page HTML (use selector and max_length to limit output)", "params": []string{"selector", "max_length"}},
 			{"name": "get_url", "description": "Get current URL", "params": []string{}},
 			{"name": "get_title", "description": "Get page title", "params": []string{}},
 			{"name": "cookies", "description": "Get all cookies", "params": []string{}},
 			{"name": "set_cookie", "description": "Set a cookie", "params": []string{"name", "value", "domain"}},
 			{"name": "pdf", "description": "Generate PDF", "params": []string{"path"}},
 			{"name": "close", "description": "Close browser", "params": []string{}},
+			{"name": "enable_devtools", "description": "Enable console/network capture (call before console_logs/network_requests)", "params": []string{}},
+			{"name": "console_logs", "description": "Get captured console logs", "params": []string{"limit"}},
+			{"name": "network_requests", "description": "Get captured network requests", "params": []string{"limit"}},
 		},
-		"total": 15,
+		"total": 18,
 	}, nil
 }
 
@@ -329,7 +346,6 @@ func (m *ToolsManager) screenshot(args map[string]interface{}) (interface{}, err
 		"path":    savePath,
 		"format":  format,
 		"size":    len(data),
-		"base64":  base64.StdEncoding.EncodeToString(data),
 	}, nil
 }
 
@@ -425,20 +441,49 @@ func (m *ToolsManager) wait(args map[string]interface{}) (interface{}, error) {
 	}, nil
 }
 
-func (m *ToolsManager) getHTML() (interface{}, error) {
+func (m *ToolsManager) getHTML(args map[string]interface{}) (interface{}, error) {
 	if m.browser == nil {
 		return nil, fmt.Errorf("browser not started")
 	}
 
-	html, err := m.browser.GetHTML()
-	if err != nil {
-		return nil, err
+	var html string
+	var err error
+
+	// Si un sélecteur est fourni, obtenir uniquement le HTML de cet élément
+	if selector, ok := args["selector"].(string); ok && selector != "" {
+		// Utiliser evaluate pour obtenir le outerHTML de l'élément sélectionné
+		result, evalErr := m.browser.Evaluate(fmt.Sprintf(`
+			(function() {
+				var el = document.querySelector('%s');
+				return el ? el.outerHTML : null;
+			})()
+		`, selector))
+		if evalErr != nil {
+			return nil, evalErr
+		}
+		if result == nil {
+			return nil, fmt.Errorf("selector not found: %s", selector)
+		}
+		html, _ = result.(string)
+	} else {
+		html, err = m.browser.GetHTML()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Limiter la longueur si max_length est spécifié
+	truncated := false
+	if maxLen, ok := args["max_length"].(float64); ok && maxLen > 0 && len(html) > int(maxLen) {
+		html = html[:int(maxLen)]
+		truncated = true
 	}
 
 	return map[string]interface{}{
-		"success": true,
-		"html":    html,
-		"length":  len(html),
+		"success":   true,
+		"html":      html,
+		"length":    len(html),
+		"truncated": truncated,
 	}, nil
 }
 
@@ -560,6 +605,169 @@ func (m *ToolsManager) close() (interface{}, error) {
 	return map[string]interface{}{
 		"success": true,
 		"message": "Browser closed",
+	}, nil
+}
+
+// consoleLogs récupère les logs console (nécessite enable_devtools d'abord)
+func (m *ToolsManager) consoleLogs(args map[string]interface{}) (interface{}, error) {
+	if m.browser == nil {
+		return nil, fmt.Errorf("browser not started")
+	}
+
+	// Limite par défaut
+	limit := 100
+	if l, ok := args["limit"].(float64); ok && l > 0 {
+		limit = int(l)
+	}
+
+	// Récupérer les logs via JavaScript (console.history si disponible)
+	// Alternative: utiliser les logs stockés côté Go si enable_devtools a été appelé
+	result, err := m.browser.Evaluate(fmt.Sprintf(`
+		(function() {
+			if (window.__holowConsoleLogs) {
+				return window.__holowConsoleLogs.slice(-%d);
+			}
+			return [];
+		})()
+	`, limit))
+	if err != nil {
+		return nil, err
+	}
+
+	logs, _ := result.([]interface{})
+	if logs == nil {
+		logs = []interface{}{}
+	}
+
+	return map[string]interface{}{
+		"success": true,
+		"logs":    logs,
+		"count":   len(logs),
+		"hint":    "Call enable_devtools first to capture console logs",
+	}, nil
+}
+
+// networkRequests récupère les requêtes réseau capturées
+func (m *ToolsManager) networkRequests(args map[string]interface{}) (interface{}, error) {
+	if m.browser == nil {
+		return nil, fmt.Errorf("browser not started")
+	}
+
+	// Limite par défaut
+	limit := 50
+	if l, ok := args["limit"].(float64); ok && l > 0 {
+		limit = int(l)
+	}
+
+	// Récupérer les requêtes via JavaScript
+	result, err := m.browser.Evaluate(fmt.Sprintf(`
+		(function() {
+			if (window.__holowNetworkRequests) {
+				return window.__holowNetworkRequests.slice(-%d).map(function(r) {
+					return {
+						url: r.url,
+						method: r.method,
+						status: r.status,
+						type: r.type,
+						size: r.size,
+						duration: r.duration
+					};
+				});
+			}
+			return [];
+		})()
+	`, limit))
+	if err != nil {
+		return nil, err
+	}
+
+	requests, _ := result.([]interface{})
+	if requests == nil {
+		requests = []interface{}{}
+	}
+
+	return map[string]interface{}{
+		"success":  true,
+		"requests": requests,
+		"count":    len(requests),
+		"hint":     "Call enable_devtools first to capture network requests",
+	}, nil
+}
+
+// enableDevtools active la capture des logs console et requêtes réseau
+func (m *ToolsManager) enableDevtools(args map[string]interface{}) (interface{}, error) {
+	if m.browser == nil {
+		return nil, fmt.Errorf("browser not started")
+	}
+
+	// Injecter le code de capture console
+	_, err := m.browser.Evaluate(`
+		(function() {
+			if (window.__holowDevtoolsEnabled) return 'already enabled';
+
+			// Capture console logs
+			window.__holowConsoleLogs = [];
+			var originalConsole = {
+				log: console.log,
+				warn: console.warn,
+				error: console.error,
+				info: console.info
+			};
+
+			['log', 'warn', 'error', 'info'].forEach(function(level) {
+				console[level] = function() {
+					var args = Array.prototype.slice.call(arguments);
+					window.__holowConsoleLogs.push({
+						level: level,
+						message: args.map(function(a) {
+							try { return JSON.stringify(a); }
+							catch(e) { return String(a); }
+						}).join(' '),
+						timestamp: Date.now()
+					});
+					// Limiter à 1000 entrées
+					if (window.__holowConsoleLogs.length > 1000) {
+						window.__holowConsoleLogs.shift();
+					}
+					originalConsole[level].apply(console, arguments);
+				};
+			});
+
+			// Capture network requests via PerformanceObserver
+			window.__holowNetworkRequests = [];
+			if (window.PerformanceObserver) {
+				var observer = new PerformanceObserver(function(list) {
+					list.getEntries().forEach(function(entry) {
+						if (entry.entryType === 'resource') {
+							window.__holowNetworkRequests.push({
+								url: entry.name,
+								method: 'GET',
+								type: entry.initiatorType,
+								size: entry.transferSize || 0,
+								duration: Math.round(entry.duration)
+							});
+							// Limiter à 500 entrées
+							if (window.__holowNetworkRequests.length > 500) {
+								window.__holowNetworkRequests.shift();
+							}
+						}
+					});
+				});
+				observer.observe({entryTypes: ['resource']});
+			}
+
+			window.__holowDevtoolsEnabled = true;
+			return 'enabled';
+		})()
+	`)
+	if err != nil {
+		return nil, err
+	}
+
+	return map[string]interface{}{
+		"success": true,
+		"message": "DevTools capture enabled (console logs + network requests)",
+		"hint":    "Use console_logs and network_requests to retrieve captured data",
 	}, nil
 }
 
