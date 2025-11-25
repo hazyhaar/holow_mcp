@@ -109,9 +109,10 @@ func (m *Manager) InitSchemas(schemasPath string) error {
 	}
 
 	// Schémas additionnels (tools, etc.) - tous dans LifecycleTools
+	// Note: browser-tools.sql n'est PAS chargé car le tool Go unifié "browser"
+	// dans internal/chromium/tools.go gère déjà toutes les actions browser
 	additionalSchemas := []string{
 		"cdp-cache.sql",
-		"browser-tools.sql",
 		"default-tools.sql",
 	}
 
