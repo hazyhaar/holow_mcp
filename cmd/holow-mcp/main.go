@@ -11,6 +11,7 @@ import (
 	"github.com/horos/holow-mcp/internal/database"
 	"github.com/horos/holow-mcp/internal/initcli"
 	"github.com/horos/holow-mcp/internal/server"
+	"github.com/horos/holow-mcp/internal/sqlshell"
 )
 
 func main() {
@@ -22,6 +23,8 @@ func main() {
 	showConfig := flag.Bool("config", false, "Show current configuration")
 	listCreds := flag.Bool("list-creds", false, "List configured credentials")
 	mcpStatus := flag.Bool("mcp-status", false, "Show MCP configuration status for AI clients")
+	sqlQuery := flag.String("sql", "", "Execute SQL query or start interactive shell (use -sql \"query\" or -sql alone)")
+	sqlDB := flag.String("db", "lifecycle-tools", "Database to query with -sql")
 	flag.Parse()
 
 	// Déterminer le chemin de base
@@ -117,6 +120,25 @@ func main() {
 		return
 	}
 
+	// Mode SQL shell
+	if *sqlQuery != "" || isFlagPassed("sql") {
+		shell := sqlshell.New(*basePath)
+		if *sqlQuery != "" {
+			// Exécuter une requête unique
+			if err := shell.Run(*sqlDB, *sqlQuery); err != nil {
+				fmt.Fprintf(os.Stderr, "SQL Error: %v\n", err)
+				os.Exit(1)
+			}
+		} else {
+			// Mode interactif
+			if err := shell.Interactive(); err != nil {
+				fmt.Fprintf(os.Stderr, "Shell Error: %v\n", err)
+				os.Exit(1)
+			}
+		}
+		return
+	}
+
 	// Déterminer le chemin des schémas
 	if *schemasPath == "" {
 		execPath, err := os.Executable()
@@ -182,4 +204,15 @@ func main() {
 	}
 
 	fmt.Fprintln(os.Stderr, "HOLOW-MCP server stopped")
+}
+
+// isFlagPassed vérifie si un flag a été passé (même sans valeur)
+func isFlagPassed(name string) bool {
+	found := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			found = true
+		}
+	})
+	return found
 }
