@@ -59,7 +59,7 @@ func (m *ToolsManager) ToolDefinitions() []map[string]interface{} {
 	return []map[string]interface{}{
 		{
 			"name":        "browser",
-			"description": "Browser automation tool. Actions: launch, connect, navigate, screenshot, evaluate, click, type, wait, get_html, get_url, get_title, cookies, set_cookie, pdf, close, list_actions",
+			"description": "Browser automation tool. Actions: launch, connect, navigate, screenshot, evaluate, click, type, wait, get_html, get_url, get_title, cookies, set_cookie, pdf, close, monitor, console_logs, network_logs, list_actions",
 			"inputSchema": map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -71,6 +71,7 @@ func (m *ToolsManager) ToolDefinitions() []map[string]interface{} {
 							"evaluate", "click", "type", "wait",
 							"get_html", "get_url", "get_title",
 							"cookies", "set_cookie", "pdf", "close",
+							"monitor", "console_logs", "network_logs",
 							"list_actions",
 						},
 					},
@@ -126,6 +127,11 @@ func (m *ToolsManager) ToolDefinitions() []map[string]interface{} {
 						"type":        "string",
 						"description": "Cookie domain (for set_cookie)",
 					},
+					"clear": map[string]interface{}{
+						"type":        "boolean",
+						"default":     false,
+						"description": "Clear logs after reading (for console_logs, network_logs)",
+					},
 				},
 				"required": []string{"action"},
 			},
@@ -178,6 +184,12 @@ func (m *ToolsManager) Execute(toolName string, args map[string]interface{}) (in
 		return m.pdf(args)
 	case "close":
 		return m.close()
+	case "monitor":
+		return m.enableMonitor()
+	case "console_logs":
+		return m.consoleLogs(args)
+	case "network_logs":
+		return m.networkLogs(args)
 	case "list_actions":
 		return m.listActions()
 	default:
@@ -204,8 +216,69 @@ func (m *ToolsManager) listActions() (interface{}, error) {
 			{"name": "set_cookie", "description": "Set a cookie", "params": []string{"name", "value", "domain"}},
 			{"name": "pdf", "description": "Generate PDF", "params": []string{"path"}},
 			{"name": "close", "description": "Close browser", "params": []string{}},
+			{"name": "monitor", "description": "Enable console/network monitoring", "params": []string{}},
+			{"name": "console_logs", "description": "Get captured console logs", "params": []string{"clear"}},
+			{"name": "network_logs", "description": "Get captured network requests", "params": []string{"clear"}},
 		},
-		"total": 15,
+		"total": 18,
+	}, nil
+}
+
+// enableMonitor active la capture des événements console et network
+func (m *ToolsManager) enableMonitor() (interface{}, error) {
+	if m.browser == nil {
+		return nil, fmt.Errorf("browser not started - use action 'launch' or 'connect' first")
+	}
+
+	if err := m.browser.EnableMonitoring(); err != nil {
+		return nil, err
+	}
+
+	return map[string]interface{}{
+		"success": true,
+		"message": "Console and network monitoring enabled",
+	}, nil
+}
+
+// consoleLogs retourne les logs console capturés
+func (m *ToolsManager) consoleLogs(args map[string]interface{}) (interface{}, error) {
+	if m.browser == nil {
+		return nil, fmt.Errorf("browser not started")
+	}
+
+	clear := false
+	if c, ok := args["clear"].(bool); ok {
+		clear = c
+	}
+
+	logs := m.browser.GetConsoleLogs(clear)
+
+	return map[string]interface{}{
+		"success": true,
+		"logs":    logs,
+		"count":   len(logs),
+		"cleared": clear,
+	}, nil
+}
+
+// networkLogs retourne les requêtes réseau capturées
+func (m *ToolsManager) networkLogs(args map[string]interface{}) (interface{}, error) {
+	if m.browser == nil {
+		return nil, fmt.Errorf("browser not started")
+	}
+
+	clear := false
+	if c, ok := args["clear"].(bool); ok {
+		clear = c
+	}
+
+	reqs := m.browser.GetNetworkRequests(clear)
+
+	return map[string]interface{}{
+		"success":  true,
+		"requests": reqs,
+		"count":    len(reqs),
+		"cleared":  clear,
 	}, nil
 }
 

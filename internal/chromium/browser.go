@@ -45,8 +45,33 @@ type Browser struct {
 	currentTargetID  string
 	currentSessionID string
 
+	// Capture des événements (console, network)
+	consoleLogs    []ConsoleLog
+	networkReqs    []NetworkRequest
+	eventsEnabled  bool
+	eventsMu       sync.RWMutex
+
 	ctx    context.Context
 	cancel context.CancelFunc
+}
+
+// ConsoleLog représente un message console
+type ConsoleLog struct {
+	Timestamp int64  `json:"timestamp"`
+	Level     string `json:"level"`
+	Message   string `json:"message"`
+	Source    string `json:"source,omitempty"`
+	Line      int    `json:"line,omitempty"`
+}
+
+// NetworkRequest représente une requête réseau
+type NetworkRequest struct {
+	RequestID string `json:"requestId"`
+	Timestamp int64  `json:"timestamp"`
+	URL       string `json:"url"`
+	Method    string `json:"method"`
+	Status    int    `json:"status,omitempty"`
+	MimeType  string `json:"mimeType,omitempty"`
 }
 
 // Response représente une réponse CDP
@@ -234,17 +259,208 @@ func (b *Browser) readLoop() {
 		}
 
 		// Déterminer si c'est une réponse ou un événement
-		var resp Response
-		if err := json.Unmarshal(message, &resp); err == nil && resp.ID > 0 {
+		var msg struct {
+			ID     int64           `json:"id"`
+			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
+			Result json.RawMessage `json:"result"`
+			Error  *CDPError       `json:"error"`
+		}
+
+		if err := json.Unmarshal(message, &msg); err != nil {
+			continue
+		}
+
+		// C'est une réponse (a un ID)
+		if msg.ID > 0 {
 			b.mu.Lock()
-			if ch, ok := b.pending[resp.ID]; ok {
-				ch <- &resp
-				delete(b.pending, resp.ID)
+			if ch, ok := b.pending[msg.ID]; ok {
+				ch <- &Response{ID: msg.ID, Result: msg.Result, Error: msg.Error}
+				delete(b.pending, msg.ID)
 			}
 			b.mu.Unlock()
+			continue
 		}
-		// Les événements sont ignorés pour l'instant
+
+		// C'est un événement (a un Method)
+		if msg.Method != "" {
+			b.handleEvent(msg.Method, msg.Params)
+		}
 	}
+}
+
+// handleEvent traite les événements CDP
+func (b *Browser) handleEvent(method string, params json.RawMessage) {
+	switch method {
+	case "Runtime.consoleAPICalled":
+		b.handleConsoleEvent(params)
+	case "Network.requestWillBeSent":
+		b.handleNetworkRequest(params)
+	case "Network.responseReceived":
+		b.handleNetworkResponse(params)
+	}
+}
+
+// handleConsoleEvent capture les logs console
+func (b *Browser) handleConsoleEvent(params json.RawMessage) {
+	var event struct {
+		Type string `json:"type"`
+		Args []struct {
+			Type  string `json:"type"`
+			Value string `json:"value"`
+		} `json:"args"`
+		Timestamp float64 `json:"timestamp"`
+		StackTrace *struct {
+			CallFrames []struct {
+				URL        string `json:"url"`
+				LineNumber int    `json:"lineNumber"`
+			} `json:"callFrames"`
+		} `json:"stackTrace"`
+	}
+
+	if err := json.Unmarshal(params, &event); err != nil {
+		return
+	}
+
+	// Construire le message
+	var message string
+	for _, arg := range event.Args {
+		if message != "" {
+			message += " "
+		}
+		message += arg.Value
+	}
+
+	log := ConsoleLog{
+		Timestamp: int64(event.Timestamp),
+		Level:     event.Type,
+		Message:   message,
+	}
+
+	if event.StackTrace != nil && len(event.StackTrace.CallFrames) > 0 {
+		log.Source = event.StackTrace.CallFrames[0].URL
+		log.Line = event.StackTrace.CallFrames[0].LineNumber
+	}
+
+	cdpLog("Console[%s]: %s", log.Level, log.Message)
+
+	b.eventsMu.Lock()
+	b.consoleLogs = append(b.consoleLogs, log)
+	// Garder max 1000 logs
+	if len(b.consoleLogs) > 1000 {
+		b.consoleLogs = b.consoleLogs[len(b.consoleLogs)-1000:]
+	}
+	b.eventsMu.Unlock()
+}
+
+// handleNetworkRequest capture les requêtes réseau
+func (b *Browser) handleNetworkRequest(params json.RawMessage) {
+	var event struct {
+		RequestID string `json:"requestId"`
+		Request   struct {
+			URL    string `json:"url"`
+			Method string `json:"method"`
+		} `json:"request"`
+		Timestamp float64 `json:"timestamp"`
+	}
+
+	if err := json.Unmarshal(params, &event); err != nil {
+		return
+	}
+
+	req := NetworkRequest{
+		RequestID: event.RequestID,
+		Timestamp: int64(event.Timestamp * 1000),
+		URL:       event.Request.URL,
+		Method:    event.Request.Method,
+	}
+
+	cdpLog("Network[%s] %s %s", req.RequestID[:8], req.Method, req.URL)
+
+	b.eventsMu.Lock()
+	b.networkReqs = append(b.networkReqs, req)
+	// Garder max 500 requêtes
+	if len(b.networkReqs) > 500 {
+		b.networkReqs = b.networkReqs[len(b.networkReqs)-500:]
+	}
+	b.eventsMu.Unlock()
+}
+
+// handleNetworkResponse met à jour la requête avec le status
+func (b *Browser) handleNetworkResponse(params json.RawMessage) {
+	var event struct {
+		RequestID string `json:"requestId"`
+		Response  struct {
+			Status   int    `json:"status"`
+			MimeType string `json:"mimeType"`
+		} `json:"response"`
+	}
+
+	if err := json.Unmarshal(params, &event); err != nil {
+		return
+	}
+
+	b.eventsMu.Lock()
+	for i := len(b.networkReqs) - 1; i >= 0; i-- {
+		if b.networkReqs[i].RequestID == event.RequestID {
+			b.networkReqs[i].Status = event.Response.Status
+			b.networkReqs[i].MimeType = event.Response.MimeType
+			break
+		}
+	}
+	b.eventsMu.Unlock()
+}
+
+// EnableMonitoring active la capture des événements console et network
+func (b *Browser) EnableMonitoring() error {
+	cdpLog("EnableMonitoring()")
+
+	// Activer Runtime pour les logs console
+	if _, err := b.Call("Runtime.enable", nil); err != nil {
+		return fmt.Errorf("Runtime.enable failed: %w", err)
+	}
+
+	// Activer Network pour les requêtes
+	if _, err := b.Call("Network.enable", nil); err != nil {
+		return fmt.Errorf("Network.enable failed: %w", err)
+	}
+
+	b.eventsMu.Lock()
+	b.eventsEnabled = true
+	b.eventsMu.Unlock()
+
+	cdpLog("Monitoring enabled (Runtime + Network)")
+	return nil
+}
+
+// GetConsoleLogs retourne les logs console capturés
+func (b *Browser) GetConsoleLogs(clear bool) []ConsoleLog {
+	b.eventsMu.Lock()
+	defer b.eventsMu.Unlock()
+
+	logs := make([]ConsoleLog, len(b.consoleLogs))
+	copy(logs, b.consoleLogs)
+
+	if clear {
+		b.consoleLogs = nil
+	}
+
+	return logs
+}
+
+// GetNetworkRequests retourne les requêtes réseau capturées
+func (b *Browser) GetNetworkRequests(clear bool) []NetworkRequest {
+	b.eventsMu.Lock()
+	defer b.eventsMu.Unlock()
+
+	reqs := make([]NetworkRequest, len(b.networkReqs))
+	copy(reqs, b.networkReqs)
+
+	if clear {
+		b.networkReqs = nil
+	}
+
+	return reqs
 }
 
 // Call envoie une commande CDP et attend la réponse
