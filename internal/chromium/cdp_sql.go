@@ -14,9 +14,10 @@ import (
 
 // CDPManager gère la connexion CDP persistante et expose cdp_call() à SQLite
 type CDPManager struct {
-	browser *Browser
-	mu      sync.RWMutex
-	db      *sql.DB
+	browser   *Browser
+	sessionID string // Session CDP active pour la page courante
+	mu        sync.RWMutex
+	db        *sql.DB
 }
 
 // NewCDPManager crée un gestionnaire CDP avec connexion persistante
@@ -34,12 +35,13 @@ func (m *CDPManager) SetDB(db *sql.DB) {
 }
 
 // EnsureConnected vérifie et établit la connexion au browser si nécessaire
+// Établit également une session vers une page (target) pour les commandes CDP
 func (m *CDPManager) EnsureConnected() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Vérifier si déjà connecté
-	if m.browser != nil {
+	// Vérifier si déjà connecté avec une session active
+	if m.browser != nil && m.sessionID != "" {
 		return nil
 	}
 
@@ -52,57 +54,56 @@ func (m *CDPManager) EnsureConnected() error {
 		FROM cdp_session_state WHERE id = 1
 	`).Scan(&wsURL, &connected, &debugPort)
 
-	// Si aucune ligne n'existe ou session non connectée, créer nouvelle connexion
-	if err == sql.ErrNoRows || (err == nil && (!connected.Valid || connected.Int64 == 0)) {
-		port := int(9222) // Port par défaut
-		if debugPort.Valid && debugPort.Int64 > 0 {
-			port = int(debugPort.Int64)
-		}
-
-		browser, err := Connect(port)
-		if err != nil {
-			return fmt.Errorf("failed to connect to browser on port %d: %w", port, err)
-		}
-
-		m.browser = browser
-
-		// Créer ou mettre à jour l'état de session
-		_, err = m.db.Exec(`
-			INSERT OR REPLACE INTO cdp_session_state (id, ws_url, connected, debug_port, updated_at)
-			VALUES (1, ?, 1, ?, strftime('%s', 'now'))
-		`, browser.wsURL, port)
-
-		if err != nil {
-			return fmt.Errorf("failed to save session state: %w", err)
-		}
-
-		return nil
-	}
-
-	// Erreur réelle
-	if err != nil {
-		return fmt.Errorf("failed to get session state: %w", err)
-	}
-
-	// Session existe et connectée, se reconnecter
-	// Note: Pour l'instant, on se reconnecte au port, pas via wsURL directement
-	port := int(9222)
+	port := 9222 // Port par défaut
 	if debugPort.Valid && debugPort.Int64 > 0 {
 		port = int(debugPort.Int64)
 	}
 
-	browser, err := Connect(port)
-	if err != nil {
-		// Marquer comme déconnecté
-		m.db.Exec(`UPDATE cdp_session_state SET connected = 0 WHERE id = 1`)
-		return fmt.Errorf("failed to reconnect to browser: %w", err)
+	// Connecter au browser si nécessaire
+	if m.browser == nil {
+		browser, connErr := Connect(port)
+		if connErr != nil {
+			return fmt.Errorf("failed to connect to browser on port %d: %w", port, connErr)
+		}
+		m.browser = browser
 	}
 
-	m.browser = browser
+	// Établir une session vers une page (target)
+	sessionID, err := m.browser.EnsurePageSession()
+	if err != nil {
+		return fmt.Errorf("failed to establish page session: %w", err)
+	}
+	m.sessionID = sessionID
+
+	// Mettre à jour l'état de session en base
+	_, err = m.db.Exec(`
+		INSERT OR REPLACE INTO cdp_session_state (id, ws_url, connected, debug_port, session_id, target_id, updated_at)
+		VALUES (1, ?, 1, ?, ?, ?, strftime('%s', 'now'))
+	`, m.browser.wsURL, port, m.sessionID, m.browser.GetCurrentTargetID())
+
+	if err != nil {
+		// Log mais ne pas échouer - la session est établie
+		fmt.Printf("warning: failed to save session state: %v\n", err)
+	}
+
 	return nil
 }
 
+// isBrowserLevelMethod vérifie si une méthode CDP est de niveau browser (pas besoin de session)
+func isBrowserLevelMethod(method string) bool {
+	browserMethods := []string{
+		"Target.", "Browser.", "SystemInfo.", "Tracing.",
+	}
+	for _, prefix := range browserMethods {
+		if len(method) >= len(prefix) && method[:len(prefix)] == prefix {
+			return true
+		}
+	}
+	return false
+}
+
 // Call exécute une commande CDP et retourne le résultat JSON
+// Utilise automatiquement la session pour les commandes de page (Page, DOM, Runtime, etc.)
 func (m *CDPManager) Call(method string, params map[string]interface{}) (string, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -111,7 +112,20 @@ func (m *CDPManager) Call(method string, params map[string]interface{}) (string,
 		return "", fmt.Errorf("browser not connected - call EnsureConnected first")
 	}
 
-	result, err := m.browser.Call(method, params)
+	var result json.RawMessage
+	var err error
+
+	// Les commandes browser-level n'ont pas besoin de session
+	if isBrowserLevelMethod(method) {
+		result, err = m.browser.Call(method, params)
+	} else {
+		// Les commandes page-level utilisent la session
+		if m.sessionID == "" {
+			return "", fmt.Errorf("no page session - call EnsureConnected first")
+		}
+		result, err = m.browser.CallWithSession(m.sessionID, method, params)
+	}
+
 	if err != nil {
 		return "", err
 	}
@@ -130,11 +144,102 @@ func (m *CDPManager) Disconnect() error {
 
 	err := m.browser.Close()
 	m.browser = nil
+	m.sessionID = "" // Réinitialiser la session
 
 	// Mettre à jour l'état
-	m.db.Exec(`UPDATE cdp_session_state SET connected = 0 WHERE id = 1`)
+	m.db.Exec(`UPDATE cdp_session_state SET connected = 0, session_id = NULL, target_id = NULL WHERE id = 1`)
 
 	return err
+}
+
+// GetSessionID retourne l'ID de session actuel
+func (m *CDPManager) GetSessionID() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.sessionID
+}
+
+// GetTargets retourne la liste des targets disponibles
+func (m *CDPManager) GetTargets() ([]TargetInfo, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if m.browser == nil {
+		return nil, fmt.Errorf("browser not connected")
+	}
+
+	return m.browser.GetTargets()
+}
+
+// CreatePage crée une nouvelle page et s'y attache
+func (m *CDPManager) CreatePage(url string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.browser == nil {
+		return "", fmt.Errorf("browser not connected")
+	}
+
+	// Créer le target
+	targetID, err := m.browser.CreateTarget(url)
+	if err != nil {
+		return "", err
+	}
+
+	// S'attacher au nouveau target
+	sessionID, err := m.browser.AttachToTarget(targetID)
+	if err != nil {
+		return "", err
+	}
+
+	m.sessionID = sessionID
+
+	// Mettre à jour l'état en base
+	m.db.Exec(`UPDATE cdp_session_state SET session_id = ?, target_id = ? WHERE id = 1`,
+		sessionID, targetID)
+
+	return targetID, nil
+}
+
+// SwitchToTarget change de target (page) actif
+func (m *CDPManager) SwitchToTarget(targetID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.browser == nil {
+		return fmt.Errorf("browser not connected")
+	}
+
+	// S'attacher au target
+	sessionID, err := m.browser.AttachToTarget(targetID)
+	if err != nil {
+		return err
+	}
+
+	m.sessionID = sessionID
+
+	// Mettre à jour l'état en base
+	m.db.Exec(`UPDATE cdp_session_state SET session_id = ?, target_id = ? WHERE id = 1`,
+		sessionID, targetID)
+
+	return nil
+}
+
+// ClosePage ferme une page par son targetId
+func (m *CDPManager) ClosePage(targetID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.browser == nil {
+		return fmt.Errorf("browser not connected")
+	}
+
+	// Si c'est la page active, réinitialiser la session
+	if m.browser.GetCurrentTargetID() == targetID {
+		m.sessionID = ""
+	}
+
+	return m.browser.CloseTarget(targetID)
 }
 
 // RegisterSQLFunctions est obsolète - utiliser sql_functions.RegisterCDPFunctions à la place

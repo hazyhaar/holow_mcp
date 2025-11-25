@@ -21,18 +21,22 @@ import (
 
 // Browser représente une instance de Chromium
 type Browser struct {
-	cmd        *exec.Cmd
-	wsURL      string
-	conn       *websocket.Conn
-	debugPort  int
+	cmd         *exec.Cmd
+	wsURL       string
+	conn        *websocket.Conn
+	debugPort   int
 	userDataDir string
 
-	msgID      int64
-	pending    map[int64]chan *Response
-	mu         sync.Mutex
+	msgID   int64
+	pending map[int64]chan *Response
+	mu      sync.Mutex
 
-	ctx        context.Context
-	cancel     context.CancelFunc
+	// Session CDP pour le target actif (page)
+	currentTargetID  string
+	currentSessionID string
+
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 // Response représente une réponse CDP
@@ -270,6 +274,192 @@ func (b *Browser) Call(method string, params interface{}) (json.RawMessage, erro
 	case <-b.ctx.Done():
 		return nil, b.ctx.Err()
 	}
+}
+
+// TargetInfo représente les informations d'un target CDP
+type TargetInfo struct {
+	TargetID string `json:"targetId"`
+	Type     string `json:"type"`
+	Title    string `json:"title"`
+	URL      string `json:"url"`
+}
+
+// GetTargets retourne la liste de tous les targets
+func (b *Browser) GetTargets() ([]TargetInfo, error) {
+	result, err := b.Call("Target.getTargets", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp struct {
+		TargetInfos []TargetInfo `json:"targetInfos"`
+	}
+	if err := json.Unmarshal(result, &resp); err != nil {
+		return nil, fmt.Errorf("failed to parse targets: %w", err)
+	}
+
+	return resp.TargetInfos, nil
+}
+
+// CreateTarget crée un nouveau target (page) et retourne son ID
+func (b *Browser) CreateTarget(url string) (string, error) {
+	if url == "" {
+		url = "about:blank"
+	}
+
+	result, err := b.Call("Target.createTarget", map[string]interface{}{
+		"url": url,
+	})
+	if err != nil {
+		return "", err
+	}
+
+	var resp struct {
+		TargetID string `json:"targetId"`
+	}
+	if err := json.Unmarshal(result, &resp); err != nil {
+		return "", fmt.Errorf("failed to parse target ID: %w", err)
+	}
+
+	return resp.TargetID, nil
+}
+
+// AttachToTarget s'attache à un target et retourne le sessionId
+func (b *Browser) AttachToTarget(targetID string) (string, error) {
+	result, err := b.Call("Target.attachToTarget", map[string]interface{}{
+		"targetId": targetID,
+		"flatten":  true, // Mode flat = les messages utilisent sessionId au lieu d'être wrappés
+	})
+	if err != nil {
+		return "", err
+	}
+
+	var resp struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.Unmarshal(result, &resp); err != nil {
+		return "", fmt.Errorf("failed to parse session ID: %w", err)
+	}
+
+	b.mu.Lock()
+	b.currentTargetID = targetID
+	b.currentSessionID = resp.SessionID
+	b.mu.Unlock()
+
+	return resp.SessionID, nil
+}
+
+// CloseTarget ferme un target
+func (b *Browser) CloseTarget(targetID string) error {
+	_, err := b.Call("Target.closeTarget", map[string]interface{}{
+		"targetId": targetID,
+	})
+	return err
+}
+
+// CallWithSession envoie une commande CDP avec un sessionId spécifique
+func (b *Browser) CallWithSession(sessionID, method string, params interface{}) (json.RawMessage, error) {
+	id := atomic.AddInt64(&b.msgID, 1)
+
+	msg := map[string]interface{}{
+		"id":        id,
+		"method":    method,
+		"sessionId": sessionID,
+	}
+	if params != nil {
+		msg["params"] = params
+	}
+
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return nil, err
+	}
+
+	// Créer le canal de réponse
+	ch := make(chan *Response, 1)
+	b.mu.Lock()
+	b.pending[id] = ch
+	b.mu.Unlock()
+
+	// Envoyer le message
+	if err := b.conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		b.mu.Lock()
+		delete(b.pending, id)
+		b.mu.Unlock()
+		return nil, err
+	}
+
+	// Attendre la réponse avec timeout
+	select {
+	case resp := <-ch:
+		if resp.Error != nil {
+			return nil, fmt.Errorf("CDP error %d: %s", resp.Error.Code, resp.Error.Message)
+		}
+		return resp.Result, nil
+	case <-time.After(30 * time.Second):
+		b.mu.Lock()
+		delete(b.pending, id)
+		b.mu.Unlock()
+		return nil, fmt.Errorf("timeout waiting for response")
+	case <-b.ctx.Done():
+		return nil, b.ctx.Err()
+	}
+}
+
+// EnsurePageSession s'assure qu'une session page est active
+// Si aucune session n'existe, crée une page et s'y attache
+func (b *Browser) EnsurePageSession() (string, error) {
+	b.mu.Lock()
+	sessionID := b.currentSessionID
+	b.mu.Unlock()
+
+	if sessionID != "" {
+		return sessionID, nil
+	}
+
+	// Chercher une page existante
+	targets, err := b.GetTargets()
+	if err != nil {
+		return "", fmt.Errorf("failed to get targets: %w", err)
+	}
+
+	var pageTargetID string
+	for _, t := range targets {
+		if t.Type == "page" {
+			pageTargetID = t.TargetID
+			break
+		}
+	}
+
+	// Créer une page si aucune n'existe
+	if pageTargetID == "" {
+		pageTargetID, err = b.CreateTarget("about:blank")
+		if err != nil {
+			return "", fmt.Errorf("failed to create page: %w", err)
+		}
+	}
+
+	// S'attacher au target
+	sessionID, err = b.AttachToTarget(pageTargetID)
+	if err != nil {
+		return "", fmt.Errorf("failed to attach to target: %w", err)
+	}
+
+	return sessionID, nil
+}
+
+// GetCurrentSession retourne le sessionId actuel
+func (b *Browser) GetCurrentSession() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.currentSessionID
+}
+
+// GetCurrentTargetID retourne l'ID du target actuel
+func (b *Browser) GetCurrentTargetID() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.currentTargetID
 }
 
 // Navigate navigue vers une URL
