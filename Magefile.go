@@ -59,20 +59,47 @@ func InitDB() error {
 	}
 
 	schemasPath, _ := filepath.Abs("schemas")
-	cmd := exec.Command(binPath, "-init", "-schemas", schemasPath)
+	basePath := getBasePath()
+
+	fmt.Printf("Base path: %s\n", basePath)
+	fmt.Printf("Schemas path: %s\n", schemasPath)
+
+	cmd := exec.Command(binPath, "-init", "-path", basePath, "-schemas", schemasPath)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
 
-// Clean supprime les fichiers générés
+// Clean supprime les fichiers générés (binaires seulement)
+// Note: Ne supprime PAS les bases de données pour éviter perte de données
 func Clean() error {
-	fmt.Println("Cleaning...")
+	fmt.Println("Cleaning build artifacts...")
 
 	// Supprimer le binaire
 	os.RemoveAll("bin")
+	fmt.Println("  ✓ Removed bin/")
 
-	// Supprimer les bases de données
+	return nil
+}
+
+// CleanDB supprime les bases de données (ATTENTION: perte de données!)
+func CleanDB() error {
+	basePath := getBasePath()
+	fmt.Printf("WARNING: This will delete all databases in %s\n", basePath)
+	fmt.Println("Press Ctrl+C to cancel, or wait 3 seconds to continue...")
+
+	// Attendre 3 secondes pour permettre l'annulation
+	// (Note: en mode non-interactif, utiliser HOLOW_FORCE_CLEAN=1)
+	if os.Getenv("HOLOW_FORCE_CLEAN") != "1" {
+		fmt.Print("3...")
+		exec.Command("sleep", "1").Run()
+		fmt.Print("2...")
+		exec.Command("sleep", "1").Run()
+		fmt.Print("1...")
+		exec.Command("sleep", "1").Run()
+		fmt.Println()
+	}
+
 	patterns := []string{
 		"*.db",
 		"*.db-shm",
@@ -80,9 +107,12 @@ func Clean() error {
 	}
 
 	for _, pattern := range patterns {
-		matches, _ := filepath.Glob(pattern)
+		fullPattern := filepath.Join(basePath, pattern)
+		matches, _ := filepath.Glob(fullPattern)
 		for _, match := range matches {
-			os.Remove(match)
+			if err := os.Remove(match); err == nil {
+				fmt.Printf("  ✓ Removed %s\n", filepath.Base(match))
+			}
 		}
 	}
 
@@ -112,6 +142,10 @@ func Run() error {
 func Validate() error {
 	fmt.Println("Validating HOROS compliance...")
 
+	// Déterminer le chemin des bases (comme main.go)
+	basePath := getBasePath()
+	fmt.Printf("Checking databases in: %s\n\n", basePath)
+
 	// Vérifier que les 6 bases existent
 	dbs := []string{
 		"holow-mcp.input.db",
@@ -124,7 +158,8 @@ func Validate() error {
 
 	missing := 0
 	for _, db := range dbs {
-		if _, err := os.Stat(db); os.IsNotExist(err) {
+		dbPath := filepath.Join(basePath, db)
+		if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 			fmt.Printf("  ❌ Missing: %s\n", db)
 			missing++
 		} else {
@@ -133,13 +168,35 @@ func Validate() error {
 	}
 
 	if missing > 0 {
-		return fmt.Errorf("%d databases missing, run 'mage initdb'", missing)
+		return fmt.Errorf("%d databases missing, run 'mage initdb' or 'holow-mcp -setup'", missing)
 	}
 
 	fmt.Println("\n✓ All 6 databases present")
 	fmt.Println("✓ Pattern 4-BDD conforme (sharding lifecycle)")
 
 	return nil
+}
+
+// getBasePath retourne le chemin de base des données
+func getBasePath() string {
+	// 1. Variable d'environnement
+	if path := os.Getenv("HOLOW_MCP_PATH"); path != "" {
+		return path
+	}
+
+	// 2. Config existante
+	home, _ := os.UserHomeDir()
+	defaultPath := filepath.Join(home, ".holow-mcp")
+	configFile := filepath.Join(defaultPath, "config.json")
+
+	if _, err := os.Stat(configFile); err == nil {
+		// Config existe, essayer de lire le basePath
+		// Note: Lecture simplifiée sans dépendance au package initcli
+		return defaultPath
+	}
+
+	// 3. Fallback
+	return defaultPath
 }
 
 // Check exécute validate + lint + test + build
