@@ -4,9 +4,19 @@ package circuit
 import (
 	"database/sql"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 )
+
+// execOrLog exécute une requête SQL et log l'erreur si elle échoue
+// Utilisé pour les opérations de persistance non critiques
+func execOrLog(db *sql.DB, query string, args ...interface{}) {
+	_, err := db.Exec(query, args...)
+	if err != nil {
+		log.Printf("[circuit-breaker] SQL exec error: %v (query: %s)", err, query)
+	}
+}
 
 // State représente l'état du circuit breaker
 type State string
@@ -113,7 +123,7 @@ func (m *Manager) Get(name string) *Breaker {
 	}
 
 	// Persister en base
-	m.db.Exec(`
+	execOrLog(m.db, `
 		INSERT INTO circuit_breakers
 		(name, state, failure_count, success_count, failure_threshold,
 		 success_threshold, timeout_seconds, last_state_change_at, half_open_max_calls)
@@ -175,7 +185,7 @@ func (b *Breaker) RecordSuccess(db *sql.DB) {
 	}
 
 	// Persister en base
-	db.Exec(`
+	execOrLog(db, `
 		UPDATE circuit_breakers
 		SET state = ?, failure_count = ?, success_count = ?,
 		    last_success_at = strftime('%s', 'now'),
@@ -207,7 +217,7 @@ func (b *Breaker) RecordFailure(db *sql.DB) {
 	}
 
 	// Persister en base
-	db.Exec(`
+	execOrLog(db, `
 		UPDATE circuit_breakers
 		SET state = ?, failure_count = ?, success_count = ?,
 		    last_failure_at = strftime('%s', 'now'),
@@ -234,7 +244,7 @@ func (b *Breaker) Reset(db *sql.DB) {
 	b.successCount = 0
 	b.lastStateChange = time.Now()
 
-	db.Exec(`
+	execOrLog(db, `
 		UPDATE circuit_breakers
 		SET state = 'closed', failure_count = 0, success_count = 0,
 		    last_state_change_at = strftime('%s', 'now')

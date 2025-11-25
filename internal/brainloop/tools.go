@@ -15,6 +15,90 @@ import (
 	"sync"
 )
 
+// allowedBasePaths définit les répertoires de base autorisés pour la lecture de fichiers
+// Ceci empêche les attaques de path traversal
+var allowedBasePaths = []string{
+	"/workspace",
+	"/tmp",
+	"/home",
+}
+
+// forbiddenPaths définit les chemins explicitement interdits
+var forbiddenPaths = []string{
+	"/etc/shadow",
+	"/etc/passwd",
+	"/etc/sudoers",
+	"/.ssh/",
+	"/private/",
+	"/.gnupg/",
+	"/.aws/",
+	"/.kube/",
+	"/credentials",
+}
+
+// validatePath vérifie qu'un chemin est sûr et autorisé
+// Retourne le chemin absolu nettoyé ou une erreur
+func validatePath(path string) (string, error) {
+	if path == "" {
+		return "", fmt.Errorf("path cannot be empty")
+	}
+
+	// Nettoyer et convertir en chemin absolu
+	cleanPath := filepath.Clean(path)
+	if !filepath.IsAbs(cleanPath) {
+		// Convertir en absolu depuis le répertoire courant
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("cannot get working directory: %w", err)
+		}
+		cleanPath = filepath.Join(cwd, cleanPath)
+		cleanPath = filepath.Clean(cleanPath)
+	}
+
+	// Vérifier les chemins interdits
+	lowerPath := strings.ToLower(cleanPath)
+	for _, forbidden := range forbiddenPaths {
+		if strings.Contains(lowerPath, strings.ToLower(forbidden)) {
+			return "", fmt.Errorf("access denied: path contains forbidden pattern")
+		}
+	}
+
+	// Vérifier que le chemin est sous un répertoire autorisé
+	allowed := false
+	for _, basePath := range allowedBasePaths {
+		if strings.HasPrefix(cleanPath, basePath) {
+			allowed = true
+			break
+		}
+	}
+
+	// Autoriser aussi le répertoire courant et ses sous-répertoires
+	if !allowed {
+		cwd, err := os.Getwd()
+		if err == nil && strings.HasPrefix(cleanPath, cwd) {
+			allowed = true
+		}
+	}
+
+	if !allowed {
+		return "", fmt.Errorf("access denied: path not in allowed directories")
+	}
+
+	// Vérifier qu'il n'y a pas de symlinks vers des chemins interdits
+	resolved, err := filepath.EvalSymlinks(cleanPath)
+	if err == nil {
+		// Le fichier existe, vérifier le chemin résolu
+		for _, forbidden := range forbiddenPaths {
+			if strings.Contains(strings.ToLower(resolved), strings.ToLower(forbidden)) {
+				return "", fmt.Errorf("access denied: symlink resolves to forbidden path")
+			}
+		}
+	}
+	// Si le fichier n'existe pas encore (EvalSymlinks échoue), c'est OK
+
+	return cleanPath, nil
+}
+
 // ToolsManager gère les outils brainloop
 type ToolsManager struct {
 	mu      sync.Mutex
@@ -515,12 +599,18 @@ func (m *ToolsManager) readSQLite(args map[string]interface{}) (interface{}, err
 		return nil, fmt.Errorf("path is required for read_sqlite")
 	}
 
+	// Valider le chemin pour empêcher le path traversal
+	validPath, err := validatePath(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("invalid path: %w", err)
+	}
+
 	maxRows := 3
 	if mr, ok := args["max_rows"].(float64); ok {
 		maxRows = int(mr)
 	}
 
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite", validPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
@@ -642,14 +732,20 @@ func (m *ToolsManager) readCode(args map[string]interface{}) (interface{}, error
 		return nil, fmt.Errorf("path is required for read_code")
 	}
 
-	content, err := os.ReadFile(filePath)
+	// Valider le chemin pour empêcher le path traversal
+	validPath, err := validatePath(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("invalid path: %w", err)
+	}
+
+	content, err := os.ReadFile(validPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read file: %w", err)
 	}
 
 	code := string(content)
 	lines := strings.Split(code, "\n")
-	ext := filepath.Ext(filePath)
+	ext := filepath.Ext(validPath)
 
 	// Detect language
 language := detectLanguage(ext)
@@ -690,7 +786,13 @@ func (m *ToolsManager) readMarkdown(args map[string]interface{}) (interface{}, e
 		return nil, fmt.Errorf("path is required for read_markdown")
 	}
 
-	content, err := os.ReadFile(filePath)
+	// Valider le chemin pour empêcher le path traversal
+	validPath, err := validatePath(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("invalid path: %w", err)
+	}
+
+	content, err := os.ReadFile(validPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read file: %w", err)
 	}
@@ -761,15 +863,21 @@ func (m *ToolsManager) readConfig(args map[string]interface{}) (interface{}, err
 		return nil, fmt.Errorf("path is required for read_config")
 	}
 
-	content, err := os.ReadFile(filePath)
+	// Valider le chemin pour empêcher le path traversal
+	validPath, err := validatePath(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("invalid path: %w", err)
+	}
+
+	content, err := os.ReadFile(validPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read file: %w", err)
 	}
 
-	ext := filepath.Ext(filePath)
+	ext := filepath.Ext(validPath)
 	result := map[string]interface{}{
 		"success":   true,
-		"file_path": filePath,
+		"file_path": validPath,
 		"format":    strings.TrimPrefix(ext, "."),
 	}
 
@@ -843,6 +951,13 @@ func (m *ToolsManager) listFiles(args map[string]interface{}) (interface{}, erro
 		}
 	}
 
+	// Valider le chemin de base pour empêcher le path traversal
+	validBasePath, err := validatePath(basePath)
+	if err != nil {
+		return nil, fmt.Errorf("invalid base path: %w", err)
+	}
+	basePath = validBasePath
+
 	// Extraire le pattern de fichier (après **)
 	filePattern := "*"
 	if idx := strings.LastIndex(pattern, "/"); idx != -1 {
@@ -851,7 +966,7 @@ func (m *ToolsManager) listFiles(args map[string]interface{}) (interface{}, erro
 
 	var files []map[string]interface{}
 
-	err := filepath.Walk(basePath, func(path string, info os.FileInfo, err error) error {
+	walkErr := filepath.Walk(basePath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil
 		}
@@ -876,8 +991,8 @@ func (m *ToolsManager) listFiles(args map[string]interface{}) (interface{}, erro
 		return nil
 	})
 
-	if err != nil {
-		return nil, err
+	if walkErr != nil {
+		return nil, walkErr
 	}
 
 	return map[string]interface{}{
@@ -910,6 +1025,13 @@ func (m *ToolsManager) searchCode(args map[string]interface{}) (interface{}, err
 	if bp, ok := args["path"].(string); ok {
 		basePath = bp
 	}
+
+	// Valider le chemin de base pour empêcher le path traversal
+	validBasePath, err := validatePath(basePath)
+	if err != nil {
+		return nil, fmt.Errorf("invalid base path: %w", err)
+	}
+	basePath = validBasePath
 
 	var matches []map[string]interface{}
 
@@ -1039,15 +1161,27 @@ func (m *ToolsManager) listTools(args map[string]interface{}) (interface{}, erro
 		return nil, fmt.Errorf("tools database not configured")
 	}
 
-	query := `SELECT name, description, category, enabled FROM tool_definitions WHERE enabled = 1`
+	// Utiliser des paramètres bindés pour éviter l'injection SQL
+	var rows *sql.Rows
+	var err error
+
 	filterCategory, hasCategory := args["category"].(string)
 	if hasCategory && filterCategory != "" {
-		query += fmt.Sprintf(" AND category = '%s'", filterCategory)
+		// Requête avec filtre par catégorie (paramètre bindé)
+		rows, err = m.toolsDB.Query(
+			`SELECT name, description, category, enabled
+			 FROM tool_definitions
+			 WHERE enabled = 1 AND category = ?
+			 ORDER BY name`,
+			filterCategory)
+	} else {
+		// Requête sans filtre
+		rows, err = m.toolsDB.Query(
+			`SELECT name, description, category, enabled
+			 FROM tool_definitions
+			 WHERE enabled = 1
+			 ORDER BY name`)
 	}
-	query += " ORDER BY name"
-
-
-rows, err := m.toolsDB.Query(query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list tools: %w", err)
 	}

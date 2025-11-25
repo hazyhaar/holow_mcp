@@ -51,16 +51,18 @@ func CDPCallFunction(manager *CDPManager) func(ctx sqlite3.Context, args ...sqli
 // RegisterCDPFunctions enregistre toutes les fonctions SQL CDP sur une connexion
 func RegisterCDPFunctions(conn *sqlite3.Conn, manager *CDPManager) error {
 	// Enregistrer cdp_call(method TEXT, params TEXT) -> TEXT
+	// Note: Pas de flag DETERMINISTIC car le résultat dépend de l'état du browser
 	err := conn.CreateFunction("cdp_call", 2,
-		sqlite3.DETERMINISTIC, // Non-déterministe car dépend de l'état du browser
+		0, // Non-déterministe: dépend de l'état externe du browser
 		CDPCallFunction(manager))
 	if err != nil {
 		return fmt.Errorf("failed to register cdp_call: %w", err)
 	}
 
 	// Enregistrer cdp_connected() -> INTEGER (1 si connecté, 0 sinon)
+	// Note: Pas de flag DETERMINISTIC car l'état de connexion peut changer
 	err = conn.CreateFunction("cdp_connected", 0,
-		sqlite3.DETERMINISTIC,
+		0, // Non-déterministe: l'état de connexion peut changer
 		func(ctx sqlite3.Context, args ...sqlite3.Value) {
 			manager.mu.RLock()
 			connected := manager.browser != nil

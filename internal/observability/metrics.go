@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"os"
 	"runtime"
+	"sort"
 	"sync"
 	"time"
 )
@@ -84,18 +85,10 @@ func (c *Collector) calculatePercentiles() (p50, p95, p99 float64) {
 		return 0, 0, 0
 	}
 
-	// Tri simple pour calcul percentiles
+	// Copier et trier avec l'algorithme optimisé de la stdlib (O(n log n))
 	sorted := make([]float64, len(c.latencies))
 	copy(sorted, c.latencies)
-
-	// Bubble sort (suffisant pour ~1000 éléments)
-	for i := 0; i < len(sorted)-1; i++ {
-		for j := 0; j < len(sorted)-i-1; j++ {
-			if sorted[j] > sorted[j+1] {
-				sorted[j], sorted[j+1] = sorted[j+1], sorted[j]
-			}
-		}
-	}
+	sort.Float64s(sorted)
 
 	n := len(sorted)
 	p50 = sorted[n*50/100]

@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -385,17 +386,82 @@ func (b *Browser) GetHTML() (string, error) {
 	return html.OuterHTML, nil
 }
 
+// escapeJSString échappe une chaîne pour insertion sécurisée dans du JavaScript
+// Protège contre les injections XSS en échappant tous les caractères dangereux
+func escapeJSString(s string) string {
+	var result strings.Builder
+	result.Grow(len(s) + 10) // Pré-allouer un peu plus
+
+	for _, r := range s {
+		switch r {
+		case '\\':
+			result.WriteString("\\\\")
+		case '\'':
+			result.WriteString("\\'")
+		case '"':
+			result.WriteString("\\\"")
+		case '\n':
+			result.WriteString("\\n")
+		case '\r':
+			result.WriteString("\\r")
+		case '\t':
+			result.WriteString("\\t")
+		case '<':
+			result.WriteString("\\x3c") // Évite </script> injection
+		case '>':
+			result.WriteString("\\x3e")
+		case '\u2028': // Line separator
+			result.WriteString("\\u2028")
+		case '\u2029': // Paragraph separator
+			result.WriteString("\\u2029")
+		default:
+			if r < 32 || r == 127 {
+				// Caractères de contrôle: encoder en hex
+				result.WriteString(fmt.Sprintf("\\x%02x", r))
+			} else {
+				result.WriteRune(r)
+			}
+		}
+	}
+	return result.String()
+}
+
+// validateCSSSelector valide qu'un sélecteur CSS ne contient pas de caractères dangereux
+func validateCSSSelector(selector string) error {
+	if len(selector) == 0 {
+		return fmt.Errorf("selector cannot be empty")
+	}
+	if len(selector) > 1024 {
+		return fmt.Errorf("selector too long (max 1024 characters)")
+	}
+	// Vérifier les caractères interdits qui pourraient casser la syntaxe JS
+	for _, r := range selector {
+		if r < 32 && r != '\t' {
+			return fmt.Errorf("selector contains invalid control character")
+		}
+	}
+	return nil
+}
+
 // Click clique sur un élément par sélecteur CSS
 func (b *Browser) Click(selector string) error {
-	// Trouver l'élément
-	_, err := b.Evaluate(fmt.Sprintf(`document.querySelector('%s').click()`, selector))
+	if err := validateCSSSelector(selector); err != nil {
+		return fmt.Errorf("invalid selector: %w", err)
+	}
+	// Trouver l'élément avec sélecteur échappé
+	escaped := escapeJSString(selector)
+	_, err := b.Evaluate(fmt.Sprintf(`document.querySelector('%s').click()`, escaped))
 	return err
 }
 
 // Type tape du texte dans un élément
 func (b *Browser) Type(selector, text string) error {
-	// Focus sur l'élément
-	_, err := b.Evaluate(fmt.Sprintf(`document.querySelector('%s').focus()`, selector))
+	if err := validateCSSSelector(selector); err != nil {
+		return fmt.Errorf("invalid selector: %w", err)
+	}
+	// Focus sur l'élément avec sélecteur échappé
+	escaped := escapeJSString(selector)
+	_, err := b.Evaluate(fmt.Sprintf(`document.querySelector('%s').focus()`, escaped))
 	if err != nil {
 		return err
 	}
@@ -416,10 +482,14 @@ func (b *Browser) Type(selector, text string) error {
 
 // WaitForSelector attend qu'un élément soit présent
 func (b *Browser) WaitForSelector(selector string, timeout time.Duration) error {
+	if err := validateCSSSelector(selector); err != nil {
+		return fmt.Errorf("invalid selector: %w", err)
+	}
+	escaped := escapeJSString(selector)
 	deadline := time.Now().Add(timeout)
 
 	for time.Now().Before(deadline) {
-		result, err := b.Evaluate(fmt.Sprintf(`document.querySelector('%s') !== null`, selector))
+		result, err := b.Evaluate(fmt.Sprintf(`document.querySelector('%s') !== null`, escaped))
 		if err != nil {
 			return err
 		}
@@ -468,7 +538,12 @@ func (b *Browser) GetURL() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return result.(string), nil
+	// Vérification de type sécurisée pour éviter les panics
+	url, ok := result.(string)
+	if !ok {
+		return "", fmt.Errorf("unexpected result type for URL: %T", result)
+	}
+	return url, nil
 }
 
 // GetTitle retourne le titre de la page
@@ -477,7 +552,12 @@ func (b *Browser) GetTitle() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return result.(string), nil
+	// Vérification de type sécurisée pour éviter les panics
+	title, ok := result.(string)
+	if !ok {
+		return "", fmt.Errorf("unexpected result type for title: %T", result)
+	}
+	return title, nil
 }
 
 // Close ferme le navigateur

@@ -472,10 +472,60 @@ func (s *Server) executeTool(tool *tools.Tool, args map[string]interface{}) (int
 	return lastResult, nil
 }
 
-// substituteParams remplace les {{param}} par leurs valeurs
+// sanitizeSQLValue échappe une valeur pour insertion sécurisée dans SQL
+// Protège contre les injections SQL en échappant tous les caractères dangereux
+func sanitizeSQLValue(value string) string {
+	// Supprimer les NULL bytes qui peuvent tronquer les chaînes
+	value = strings.ReplaceAll(value, "\x00", "")
+
+	// Échapper les backslashes d'abord (important pour l'ordre)
+	value = strings.ReplaceAll(value, "\\", "\\\\")
+
+	// Échapper les guillemets simples (standard SQL)
+	value = strings.ReplaceAll(value, "'", "''")
+
+	// Supprimer les caractères de contrôle dangereux (sauf newline et tab)
+	var sanitized strings.Builder
+	for _, r := range value {
+		// Autoriser: printable ASCII, newline, tab, et caractères Unicode valides
+		if r == '\n' || r == '\t' || r == '\r' || (r >= 32 && r < 127) || r >= 128 {
+			sanitized.WriteRune(r)
+		}
+	}
+
+	return sanitized.String()
+}
+
+// validateParamKey vérifie qu'un nom de paramètre est valide
+func validateParamKey(key string) bool {
+	if len(key) == 0 || len(key) > 64 {
+		return false
+	}
+	for i, r := range key {
+		if i == 0 {
+			// Premier caractère: lettre ou underscore
+			if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '_') {
+				return false
+			}
+		} else {
+			// Caractères suivants: lettre, chiffre ou underscore
+			if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// substituteParams remplace les {{param}} par leurs valeurs de façon sécurisée
 func (s *Server) substituteParams(template string, args map[string]interface{}) string {
 	result := template
 	for key, value := range args {
+		// Valider le nom du paramètre
+		if !validateParamKey(key) {
+			continue
+		}
+
 		placeholder := "{{" + key + "}}"
 		var strValue string
 		switch v := value.(type) {
@@ -483,16 +533,35 @@ func (s *Server) substituteParams(template string, args map[string]interface{}) 
 			strValue = v
 		case float64:
 			strValue = fmt.Sprintf("%v", v)
+		case int:
+			strValue = fmt.Sprintf("%d", v)
+		case int64:
+			strValue = fmt.Sprintf("%d", v)
 		case bool:
-			strValue = fmt.Sprintf("%v", v)
+			if v {
+				strValue = "1"
+			} else {
+				strValue = "0"
+			}
 		case nil:
 			strValue = ""
 		default:
-			jsonBytes, _ := json.Marshal(v)
+			jsonBytes, err := json.Marshal(v)
+			if err != nil {
+				continue // Ignorer les valeurs non sérialisables
+			}
 			strValue = string(jsonBytes)
 		}
-		// Échapper les guillemets simples pour SQL (évite injection et erreurs de parsing)
-		strValue = strings.ReplaceAll(strValue, "'", "''")
+
+		// Appliquer l'échappement SQL sécurisé
+		strValue = sanitizeSQLValue(strValue)
+
+		// Limiter la longueur des valeurs pour éviter les attaques DoS
+		const maxValueLen = 65536 // 64KB max par valeur
+		if len(strValue) > maxValueLen {
+			strValue = strValue[:maxValueLen]
+		}
+
 		result = strings.ReplaceAll(result, placeholder, strValue)
 	}
 
