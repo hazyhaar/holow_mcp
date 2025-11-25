@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -93,6 +94,18 @@ func NewServer(basePath string) (*Server, error) {
 
 	// Étape 4: Configurer le CDPManager avec la base LifecycleTools maintenant ouverte
 	cdpMgr.SetDB(db.LifecycleTools)
+
+	// Étape 5: Récupération et migrations au boot
+	schemasPath := filepath.Join(basePath, "schemas")
+	if _, err := os.Stat(schemasPath); os.IsNotExist(err) {
+		// Fallback: chercher dans le répertoire de l'exécutable
+		if execPath, err := os.Executable(); err == nil {
+			schemasPath = filepath.Join(filepath.Dir(execPath), "..", "..", "schemas")
+		}
+	}
+	if err := db.RecoverAndMigrate(schemasPath); err != nil {
+		fmt.Fprintf(os.Stderr, "[warn] recovery/migration: %v\n", err)
+	}
 
 	// Découverte système au démarrage
 	disco := discovery.New(db.LifecycleCore)
