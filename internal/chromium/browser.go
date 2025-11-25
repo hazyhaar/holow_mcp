@@ -19,6 +19,16 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// cdpDebug active les logs de debug CDP (via env CDP_DEBUG=1)
+var cdpDebug = os.Getenv("CDP_DEBUG") == "1"
+
+// cdpLog log un message de debug CDP si activé
+func cdpLog(format string, args ...interface{}) {
+	if cdpDebug {
+		fmt.Fprintf(os.Stderr, "[CDP] "+format+"\n", args...)
+	}
+}
+
 // Browser représente une instance de Chromium
 type Browser struct {
 	cmd         *exec.Cmd
@@ -83,14 +93,18 @@ func Launch(cfg *Config) (*Browser, error) {
 		cfg = DefaultConfig()
 	}
 
+	cdpLog("Launch(headless=%v, port=%d)", cfg.Headless, cfg.DebugPort)
+
 	// Utiliser le chemin fourni ou chercher
 	chromePath := cfg.ChromePath
 	if chromePath == "" {
 		chromePath = findChromium()
 	}
 	if chromePath == "" {
+		cdpLog("ERROR: chromium not found")
 		return nil, fmt.Errorf("chromium not found: set ChromePath in config or install chromium")
 	}
+	cdpLog("Using chromium: %s", chromePath)
 
 	// Créer un répertoire temporaire pour les données utilisateur
 	if cfg.UserDataDir == "" {
@@ -174,15 +188,20 @@ func Launch(cfg *Config) (*Browser, error) {
 
 // Connect se connecte à une instance Chromium existante
 func Connect(debugPort int) (*Browser, error) {
+	cdpLog("Connect(port=%d)", debugPort)
+
 	wsURL, err := getDebuggerURL(debugPort)
 	if err != nil {
 		return nil, err
 	}
 
+	cdpLog("Dialing WebSocket: %s", wsURL)
 	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
+		cdpLog("WebSocket ERROR: %v", err)
 		return nil, fmt.Errorf("failed to connect websocket: %w", err)
 	}
+	cdpLog("WebSocket connected")
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -245,6 +264,8 @@ func (b *Browser) Call(method string, params interface{}) (json.RawMessage, erro
 		return nil, err
 	}
 
+	cdpLog("Call[%d] %s params=%s", id, method, string(data))
+
 	// Créer le canal de réponse
 	ch := make(chan *Response, 1)
 	b.mu.Lock()
@@ -253,6 +274,7 @@ func (b *Browser) Call(method string, params interface{}) (json.RawMessage, erro
 
 	// Envoyer le message
 	if err := b.conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		cdpLog("Call[%d] SEND ERROR: %v", id, err)
 		b.mu.Lock()
 		delete(b.pending, id)
 		b.mu.Unlock()
@@ -263,15 +285,19 @@ func (b *Browser) Call(method string, params interface{}) (json.RawMessage, erro
 	select {
 	case resp := <-ch:
 		if resp.Error != nil {
+			cdpLog("Call[%d] CDP ERROR: %d %s", id, resp.Error.Code, resp.Error.Message)
 			return nil, fmt.Errorf("CDP error %d: %s", resp.Error.Code, resp.Error.Message)
 		}
+		cdpLog("Call[%d] OK result=%d bytes", id, len(resp.Result))
 		return resp.Result, nil
 	case <-time.After(30 * time.Second):
+		cdpLog("Call[%d] TIMEOUT", id)
 		b.mu.Lock()
 		delete(b.pending, id)
 		b.mu.Unlock()
 		return nil, fmt.Errorf("timeout waiting for response")
 	case <-b.ctx.Done():
+		cdpLog("Call[%d] CANCELLED", id)
 		return nil, b.ctx.Err()
 	}
 }
@@ -823,9 +849,12 @@ func waitForDebugger(port int, timeout time.Duration) (string, error) {
 // getDebuggerURL récupère l'URL WebSocket d'une PAGE (pas du browser)
 // Important: Les commandes Page.* ne fonctionnent qu'au niveau page, pas browser
 func getDebuggerURL(port int) (string, error) {
-	// Se connecter à /json pour obtenir les pages, pas /json/version (browser)
-	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/json", port))
+	url := fmt.Sprintf("http://127.0.0.1:%d/json", port)
+	cdpLog("GET %s", url)
+
+	resp, err := http.Get(url)
 	if err != nil {
+		cdpLog("ERROR: %v", err)
 		return "", err
 	}
 	defer resp.Body.Close()
@@ -833,15 +862,24 @@ func getDebuggerURL(port int) (string, error) {
 	var pages []struct {
 		WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
 		Type                 string `json:"type"`
+		URL                  string `json:"url"`
+		Title                string `json:"title"`
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&pages); err != nil {
+		cdpLog("ERROR decode: %v", err)
 		return "", err
+	}
+
+	cdpLog("Found %d targets:", len(pages))
+	for i, p := range pages {
+		cdpLog("  [%d] type=%s url=%s ws=%s", i, p.Type, p.URL, p.WebSocketDebuggerURL != "")
 	}
 
 	// Chercher une page de type "page"
 	for _, p := range pages {
 		if p.Type == "page" && p.WebSocketDebuggerURL != "" {
+			cdpLog("Selected page: %s", p.URL)
 			return p.WebSocketDebuggerURL, nil
 		}
 	}
@@ -849,10 +887,12 @@ func getDebuggerURL(port int) (string, error) {
 	// Fallback: prendre n'importe quelle cible avec une URL WebSocket
 	for _, p := range pages {
 		if p.WebSocketDebuggerURL != "" {
+			cdpLog("Fallback target: type=%s url=%s", p.Type, p.URL)
 			return p.WebSocketDebuggerURL, nil
 		}
 	}
 
+	cdpLog("ERROR: no page available")
 	return "", fmt.Errorf("no page available - browser may have no tabs open")
 }
 
