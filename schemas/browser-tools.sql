@@ -59,7 +59,7 @@ INSERT OR REPLACE INTO tool_implementations
 (tool_name, step_order, step_name, step_type, sql_template)
 VALUES
     ('browser_screenshot', 1, 'capture', 'sql',
-     'SELECT cdp_call(''Page.captureScreenshot'', json_object(''format'', ''{{format}}'', ''quality'', {{quality}}, ''captureBeyondViewport'', {{full_page}}))');
+     'SELECT cdp_call(''Page.captureScreenshot'', json_object(''format'', COALESCE(NULLIF(''{{format}}'', ''''), ''png''), ''quality'', COALESCE(NULLIF(''{{quality}}'', ''''), 80), ''captureBeyondViewport'', CASE WHEN ''{{full_page}}'' IN (''1'', ''true'') THEN json(''true'') ELSE json(''false'') END))');
 
 -- Tool 3: browser_evaluate
 -- Exécuter du JavaScript sur la page
@@ -251,16 +251,13 @@ VALUES
     ('browser_extract_content', 3, 'get_text', 'sql',
      'SELECT cdp_call(''Runtime.evaluate'', json_object(
          ''expression'',
-         ''document.body.innerText.substring(0, {{max_length}})'',
+         ''document.body.innerText.substring(0, '' || COALESCE(NULLIF(''{{max_length}}'', ''''), ''10000'') || '')'',
          ''returnByValue'', 1
      ))'),
     ('browser_extract_content', 4, 'get_headings', 'sql',
      'SELECT cdp_call(''Runtime.evaluate'', json_object(
          ''expression'',
-         ''JSON.stringify(Array.from(document.querySelectorAll("h1, h2, h3")).map(h => ({
-             level: h.tagName,
-             text: h.textContent.trim()
-         })))'',
+         ''JSON.stringify(Array.from(document.querySelectorAll("h1, h2, h3")).map(h => ({level: h.tagName, text: h.textContent.trim()})))'',
          ''returnByValue'', 1
      ))');
 
@@ -321,8 +318,7 @@ VALUES
      'SELECT cdp_call(''Network.setCookie'', json_object(
          ''name'', ''{{name}}'',
          ''value'', ''{{value}}'',
-         ''domain'', ''{{domain}}'',
-         ''path'', ''{{path}}''
+         ''url'', ''https://'' || REPLACE(REPLACE(''{{domain}}'', ''http://'', ''''), ''https://'', '''') || COALESCE(NULLIF(''{{path}}'', ''''), ''/'')
      ))');
 
 -- Tool 10: browser_cookies_delete

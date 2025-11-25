@@ -473,15 +473,14 @@ func (s *Server) executeTool(tool *tools.Tool, args map[string]interface{}) (int
 }
 
 // sanitizeSQLValue échappe une valeur pour insertion sécurisée dans SQL
-// Protège contre les injections SQL en échappant tous les caractères dangereux
+// Protège contre les injections SQL en échappant les guillemets simples
+// Note: SQLite n'utilise PAS backslash comme caractère d'échappement
 func sanitizeSQLValue(value string) string {
 	// Supprimer les NULL bytes qui peuvent tronquer les chaînes
 	value = strings.ReplaceAll(value, "\x00", "")
 
-	// Échapper les backslashes d'abord (important pour l'ordre)
-	value = strings.ReplaceAll(value, "\\", "\\\\")
-
-	// Échapper les guillemets simples (standard SQL)
+	// Échapper les guillemets simples (standard SQL: ' -> '')
+	// Note: Ne PAS échapper les backslashes - SQLite ne les interprète pas
 	value = strings.ReplaceAll(value, "'", "''")
 
 	// Supprimer les caractères de contrôle dangereux (sauf newline et tab)
@@ -494,6 +493,39 @@ func sanitizeSQLValue(value string) string {
 	}
 
 	return sanitized.String()
+}
+
+// escapeJSONValue échappe une valeur pour insertion dans une chaîne JSON
+// Utilisé quand le placeholder est à l'intérieur d'un json_object() ou d'une chaîne JSON
+func escapeJSONValue(value string) string {
+	var result strings.Builder
+	result.Grow(len(value) + 10)
+
+	for _, r := range value {
+		switch r {
+		case '\\':
+			result.WriteString("\\\\")
+		case '"':
+			result.WriteString("\\\"")
+		case '\n':
+			result.WriteString("\\n")
+		case '\r':
+			result.WriteString("\\r")
+		case '\t':
+			result.WriteString("\\t")
+		case '\x00':
+			// Ignorer les NULL bytes
+		default:
+			if r < 32 {
+				// Caractères de contrôle: encoder en unicode escape
+				result.WriteString(fmt.Sprintf("\\u%04x", r))
+			} else {
+				result.WriteRune(r)
+			}
+		}
+	}
+
+	return result.String()
 }
 
 // validateParamKey vérifie qu'un nom de paramètre est valide
@@ -515,6 +547,44 @@ func validateParamKey(key string) bool {
 		}
 	}
 	return true
+}
+
+// isInJavaScriptContext vérifie si un placeholder est dans un contexte JavaScript/JSON
+// (par ex. inside json_object('expression', '...{{param}}...'))
+func isInJavaScriptContext(template, placeholder string) bool {
+	idx := strings.Index(template, placeholder)
+	if idx == -1 {
+		return false
+	}
+
+	// Regarder le contexte avant le placeholder (max 200 caractères)
+	lookback := 200
+	if idx < lookback {
+		lookback = idx
+	}
+	context := strings.ToLower(template[idx-lookback : idx])
+
+	// Indicateurs de contexte JavaScript/JSON
+	jsIndicators := []string{
+		"expression",
+		"document.",
+		"window.",
+		"json.stringify",
+		".queryselector",
+		".click()",
+		".focus()",
+		".value",
+		"innertext",
+		"innerhtml",
+	}
+
+	for _, indicator := range jsIndicators {
+		if strings.Contains(context, indicator) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // substituteParams remplace les {{param}} par leurs valeurs de façon sécurisée
@@ -553,14 +623,20 @@ func (s *Server) substituteParams(template string, args map[string]interface{}) 
 			strValue = string(jsonBytes)
 		}
 
-		// Appliquer l'échappement SQL sécurisé
-		strValue = sanitizeSQLValue(strValue)
-
 		// Limiter la longueur des valeurs pour éviter les attaques DoS
 		const maxValueLen = 65536 // 64KB max par valeur
 		if len(strValue) > maxValueLen {
 			strValue = strValue[:maxValueLen]
 		}
+
+		// Déterminer le type d'échappement nécessaire
+		if isInJavaScriptContext(result, placeholder) {
+			// Contexte JavaScript: échapper pour JS d'abord, puis SQL
+			strValue = escapeJSONValue(strValue)
+		}
+
+		// Toujours appliquer l'échappement SQL (guillemets simples)
+		strValue = sanitizeSQLValue(strValue)
 
 		result = strings.ReplaceAll(result, placeholder, strValue)
 	}

@@ -54,7 +54,8 @@ CREATE TABLE IF NOT EXISTS cdp_session_state (
     current_title TEXT,                     -- Titre de la page actuelle
     chromium_pid INTEGER,                   -- PID du processus Chromium
     debug_port INTEGER DEFAULT 9222,        -- Port de debug
-    session_id TEXT,                        -- ID de session unique
+    session_id TEXT,                        -- ID de session CDP (pour Target.attachToTarget)
+    target_id TEXT,                         -- ID du target (page) actif
     last_activity_at INTEGER,               -- Timestamp dernière activité
     created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
     updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
