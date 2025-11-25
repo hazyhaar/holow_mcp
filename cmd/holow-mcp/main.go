@@ -19,6 +19,7 @@ func main() {
 	initDB := flag.Bool("init", false, "Initialize databases with schemas")
 	initInteractive := flag.Bool("setup", false, "Run interactive setup wizard")
 	basePath := flag.String("path", "", "Base path for databases")
+	testMode := flag.Bool("test", false, "Use isolated test environment (creates temp path)")
 	schemasPath := flag.String("schemas", "", "Path to schema SQL files")
 	showConfig := flag.Bool("config", false, "Show current configuration")
 	listCreds := flag.Bool("list-creds", false, "List configured credentials")
@@ -26,6 +27,13 @@ func main() {
 	sqlQuery := flag.String("sql", "", "Execute SQL query or start interactive shell (use -sql \"query\" or -sql alone)")
 	sqlDB := flag.String("db", "lifecycle-tools", "Database to query with -sql")
 	flag.Parse()
+
+	// Mode test: environnement isolé
+	if *testMode {
+		testPath := filepath.Join(os.TempDir(), fmt.Sprintf("holow-test-%d", os.Getpid()))
+		fmt.Fprintf(os.Stderr, "[TEST MODE] Using isolated path: %s\n", testPath)
+		*basePath = testPath
+	}
 
 	// Déterminer le chemin de base
 	if *basePath == "" {

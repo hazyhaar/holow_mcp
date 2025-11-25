@@ -134,7 +134,7 @@ func Run() (*Config, error) {
 		config = &Config{Providers: make(map[string]string)}
 	}
 
-	// Étape 2: Chemin d'installation (si nouveau)
+	// Étape 2: Chemin d'installation
 	if config.BasePath == "" {
 		fmt.Printf("\n[?] Chemin d'installation [%s]: ", defaultPath)
 		input, _ := reader.ReadString('\n')
@@ -150,9 +150,21 @@ func Run() (*Config, error) {
 		config.BasePath = input
 	}
 
-	// Étape 3: Nom de la base credentials
+	// Étape 3: Nom de la base credentials (permet d'isoler les environnements)
 	if config.CredentialsDB == "" {
-		config.CredentialsDB = "credentials"
+		fmt.Printf("\n[?] Nom de la base credentials [credentials]: ")
+		input, _ := reader.ReadString('\n')
+		input = strings.TrimSpace(input)
+		if input == "" {
+			input = "credentials"
+		}
+		// Valider le nom (alphanumérique + tirets)
+		for _, c := range input {
+			if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_') {
+				return nil, fmt.Errorf("nom credentials invalide: caractères alphanum/tirets uniquement")
+			}
+		}
+		config.CredentialsDB = input
 	}
 
 	// Étape 4: Setup credentials
