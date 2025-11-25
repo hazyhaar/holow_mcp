@@ -130,6 +130,13 @@ func Run() (*Config, error) {
 		fmt.Println("[OK] Credentials sauvegardées")
 	}
 
+	// Étape 6: Configuration MCP pour les AI clients
+	if promptYesNo(reader, "\nConfigurer les AI clients (Claude Code, Gemini CLI, OpenCode)?", true) {
+		if err := RunMCPConfigSetup(reader, config.BasePath); err != nil {
+			fmt.Printf("\n[!] Erreur configuration MCP: %v\n", err)
+		}
+	}
+
 	// Résumé
 	printSummary(config)
 

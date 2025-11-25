@@ -21,6 +21,7 @@ func main() {
 	schemasPath := flag.String("schemas", "", "Path to schema SQL files")
 	showConfig := flag.Bool("config", false, "Show current configuration")
 	listCreds := flag.Bool("list-creds", false, "List configured credentials")
+	mcpStatus := flag.Bool("mcp-status", false, "Show MCP configuration status for AI clients")
 	flag.Parse()
 
 	// Déterminer le chemin de base
@@ -107,6 +108,12 @@ func main() {
 			hint := initcli.CredentialHint(cfg.BasePath, cfg.CredentialsDB, p)
 			fmt.Printf("  - %s (%s)\n", p, hint)
 		}
+		return
+	}
+
+	// Mode statut MCP
+	if *mcpStatus {
+		initcli.PrintMCPConfigStatus()
 		return
 	}
 
