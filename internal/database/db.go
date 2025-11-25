@@ -89,13 +89,14 @@ func NewManager(basePath string, cdpCallback ConnCallback) (*Manager, error) {
 
 // InitSchemas initialise les schémas depuis les fichiers SQL
 func (m *Manager) InitSchemas(schemasPath string) error {
+	// Schémas de base (1 par DB)
 	schemas := map[string]*sql.DB{
-		"input.sql":              m.Input,
-		"lifecycle-tools.sql":    m.LifecycleTools,
+		"input.sql":               m.Input,
+		"lifecycle-tools.sql":     m.LifecycleTools,
 		"lifecycle-execution.sql": m.LifecycleExec,
-		"lifecycle-core.sql":     m.LifecycleCore,
-		"output.sql":             m.Output,
-		"metadata.sql":           m.Metadata,
+		"lifecycle-core.sql":      m.LifecycleCore,
+		"output.sql":              m.Output,
+		"metadata.sql":            m.Metadata,
 	}
 
 	for schemaFile, db := range schemas {
@@ -106,6 +107,26 @@ func (m *Manager) InitSchemas(schemasPath string) error {
 		}
 
 		if _, err := db.Exec(string(content)); err != nil {
+			return fmt.Errorf("failed to execute schema %s: %w", schemaFile, err)
+		}
+	}
+
+	// Schémas additionnels (tools, etc.) - tous dans LifecycleTools
+	additionalSchemas := []string{
+		"cdp-cache.sql",
+		"browser-tools.sql",
+		"default-tools.sql",
+	}
+
+	for _, schemaFile := range additionalSchemas {
+		schemaPath := filepath.Join(schemasPath, schemaFile)
+		content, err := os.ReadFile(schemaPath)
+		if err != nil {
+			// Fichier optionnel - ne pas bloquer
+			continue
+		}
+
+		if _, err := m.LifecycleTools.Exec(string(content)); err != nil {
 			return fmt.Errorf("failed to execute schema %s: %w", schemaFile, err)
 		}
 	}
