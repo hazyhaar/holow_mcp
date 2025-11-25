@@ -1,13 +1,15 @@
 // Package chromium - Enregistrement des fonctions SQL CDP
-// Note: Avec modernc.org/sqlite, les fonctions custom sont gérées différemment
-// On utilise un pattern de CDPManager global accessible par les fonctions Go
+// Avec modernc.org/sqlite, les fonctions custom sont enregistrées globalement
 package chromium
 
 import (
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"fmt"
 	"sync"
+
+	"modernc.org/sqlite"
 )
 
 // CDPFunctionRegistry gère l'accès au CDPManager pour les fonctions SQL
@@ -18,6 +20,47 @@ type CDPFunctionRegistry struct {
 
 // globalRegistry est le registre global pour les fonctions CDP
 var globalRegistry = &CDPFunctionRegistry{}
+
+// init enregistre les fonctions SQL CDP au démarrage
+func init() {
+	// cdp_call(method, params) -> résultat JSON
+	sqlite.MustRegisterScalarFunction("cdp_call", 2, func(ctx *sqlite.FunctionContext, args []driver.Value) (driver.Value, error) {
+		method, ok := args[0].(string)
+		if !ok {
+			return nil, fmt.Errorf("cdp_call: method must be a string")
+		}
+		paramsJSON := "{}"
+		if args[1] != nil {
+			paramsJSON, ok = args[1].(string)
+			if !ok {
+				return nil, fmt.Errorf("cdp_call: params must be a JSON string")
+			}
+		}
+		return ExecuteCDPCall(method, paramsJSON)
+	})
+
+	// cdp_connected() -> 1 si connecté, 0 sinon
+	sqlite.MustRegisterScalarFunction("cdp_connected", 0, func(ctx *sqlite.FunctionContext, args []driver.Value) (driver.Value, error) {
+		if CDPConnected() {
+			return int64(1), nil
+		}
+		return int64(0), nil
+	})
+
+	// cdp_session_id() -> ID de session actuel
+	sqlite.MustRegisterScalarFunction("cdp_session_id", 0, func(ctx *sqlite.FunctionContext, args []driver.Value) (driver.Value, error) {
+		sid := CDPSessionID()
+		if sid == "" {
+			return nil, nil
+		}
+		return sid, nil
+	})
+
+	// cdp_list_pages() -> JSON array des pages
+	sqlite.MustRegisterScalarFunction("cdp_list_pages", 0, func(ctx *sqlite.FunctionContext, args []driver.Value) (driver.Value, error) {
+		return CDPListPages()
+	})
+}
 
 // SetCDPManager définit le CDPManager global pour les fonctions SQL
 func SetCDPManager(manager *CDPManager) {
